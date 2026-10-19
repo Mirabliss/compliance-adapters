@@ -1,6 +1,7 @@
 import express from 'express';
+import { randomBytes } from 'crypto';
 import { Keypair, Networks } from '@stellar/stellar-sdk';
-import { generateChallenge, createSep10Middleware } from '../../src';
+import { createSep10Router, createSep10Middleware } from '../../src';
 
 export interface ExampleAppOptions {
   /**
@@ -13,6 +14,8 @@ export interface ExampleAppOptions {
   homeDomain?: string;
   webAuthDomain?: string;
   networkPassphrase?: string;
+  /** HMAC secret for the session JWT returned by `POST /auth`. Defaults to a random demo secret. */
+  jwtSecret?: string;
 }
 
 export interface ExampleApp {
@@ -36,32 +39,20 @@ export function createApp(options: ExampleAppOptions = {}): ExampleApp {
   const app = express();
   app.use(express.json());
 
-  // Step 1: client requests a challenge transaction for its address to sign.
-  app.get('/challenge', (req, res) => {
-    const clientAddress = req.query.address;
+  // Step 1: the router exposes the SEP-10 endpoints. GET /auth returns a
+  // challenge transaction for the client to sign; POST /auth exchanges the
+  // signed challenge for a session token.
+  app.use(
+    createSep10Router({
+      serverKeypair,
+      homeDomain,
+      webAuthDomain,
+      networkPassphrase,
+      jwtSecret: options.jwtSecret ?? randomBytes(32).toString('hex'),
+    }),
+  );
 
-    if (typeof clientAddress !== 'string' || !clientAddress) {
-      res.status(400).json({ error: 'missing required "address" query parameter' });
-      return;
-    }
-
-    try {
-      const challenge = generateChallenge(clientAddress, serverKeypair, {
-        homeDomain,
-        webAuthDomain,
-        networkPassphrase,
-      });
-
-      res.json({
-        transaction: challenge.transactionXDR,
-        network_passphrase: challenge.networkPassphrase,
-      });
-    } catch {
-      res.status(400).json({ error: 'invalid "address" query parameter' });
-    }
-  });
-
-  // Step 2: client signs the challenge with its own wallet and sends the signed
+  // Step 2: the client signs the challenge with its own wallet and sends the signed
   // XDR back as a bearer token on any protected route.
   app.get(
     '/protected',

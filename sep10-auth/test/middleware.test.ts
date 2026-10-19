@@ -24,6 +24,7 @@ function makeRes(): Response {
   const res = {} as Response;
   res.status = jest.fn().mockReturnValue(res);
   res.json = jest.fn().mockReturnValue(res);
+  res.set = jest.fn().mockReturnValue(res);
   return res;
 }
 
@@ -111,7 +112,66 @@ describe('createSep10Middleware', () => {
         error: 'unauthorized',
         reason: 'missing bearer token',
       });
+      expect(res.set).toHaveBeenCalledWith(
+        'WWW-Authenticate',
+        'Bearer realm="example.com", error="invalid_request"',
+      );
       expect(next).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('WWW-Authenticate header (RFC 6750)', () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    it('sets error="invalid_token" when the token is too large', async () => {
+      const res = makeRes();
+      await createSep10Middleware(options)(
+        makeReq(`Bearer ${'a'.repeat(8193)}`),
+        res,
+        jest.fn() as unknown as NextFunction,
+      );
+      expect(res.set).toHaveBeenCalledWith(
+        'WWW-Authenticate',
+        'Bearer realm="example.com", error="invalid_token"',
+      );
+    });
+
+    it('sets error="invalid_token" when verification fails', async () => {
+      const res = makeRes();
+      await createSep10Middleware(options)(
+        makeReq('Bearer not-a-real-xdr'),
+        res,
+        jest.fn() as unknown as NextFunction,
+      );
+      expect(res.status).toHaveBeenCalledWith(401);
+      expect(res.set).toHaveBeenCalledWith(
+        'WWW-Authenticate',
+        'Bearer realm="example.com", error="invalid_token"',
+      );
+    });
+
+    it('sets error="invalid_token" when the address is revoked and uses the first home domain as realm', async () => {
+      jest.spyOn(verifyModule, 'verifyChallenge').mockReturnValue({
+        valid: true,
+        address: Keypair.random().publicKey(),
+      });
+      const store: RevocationStore = {
+        isRevoked: jest.fn().mockResolvedValue(true),
+        revoke: jest.fn(),
+        unrevoke: jest.fn(),
+      };
+      const res = makeRes();
+      await createSep10Middleware({
+        ...options,
+        homeDomains: ['example.com', 'other.example.com'],
+        revocationStore: store,
+      })(makeReq('Bearer some-xdr'), res, jest.fn() as unknown as NextFunction);
+      expect(res.set).toHaveBeenCalledWith(
+        'WWW-Authenticate',
+        'Bearer realm="example.com", error="invalid_token"',
+      );
     });
   });
 

@@ -129,18 +129,38 @@ export interface Sep10MiddlewareOptions extends VerifyChallengeOptions {
 
 const DEFAULT_MAX_TOKEN_LENGTH = 8192;
 
-// Reference pattern only: expects the raw signed SEP-10 challenge XDR on every
-// request via `Authorization: Bearer <base64-xdr>`. A production app would
-// typically verify once and issue a short-lived session JWT instead of
-// re-verifying the challenge transaction on every request; that is out of
-// scope for this package.
-export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestHandler {
-  const logger = options.logger ?? noopLogger;
-  const maxTokenLength = options.maxTokenLength ?? DEFAULT_MAX_TOKEN_LENGTH;
+/**
+ * RFC 6750 §3.1 error code for a 401 response: `invalid_request` when the
+ * `Authorization` header is missing or malformed, `invalid_token` when the
+ * token itself was rejected.
+ */
+export type BearerErrorCode = 'invalid_request' | 'invalid_token';
 
-  // ── #39: Validate required configuration at construction time ──────────────
-  // Catch misconfiguration early rather than on first request.
+/** Request headers as exposed by Node's `http` module and Fastify. */
+export type RequestHeaders = Record<string, string | string[] | undefined>;
 
+/**
+ * The result of {@link authenticateRequest}.
+ *
+ * On failure, `wwwAuthenticate` is the RFC 6750 §3 `WWW-Authenticate` header
+ * value adapters must send alongside the 401 response.
+ */
+export type AuthenticateRequestResult =
+  | { ok: true; address: string }
+  | {
+      ok: false;
+      error: BearerErrorCode;
+      reason: string;
+      wwwAuthenticate: string;
+      logMessage: string;
+      logContext?: Record<string, unknown>;
+    };
+
+/**
+ * Validates the middleware options once at construction time and returns the
+ * normalised home domains. Shared by every framework adapter.
+ */
+export function assertSep10MiddlewareOptions(options: Sep10MiddlewareOptions): string[] {
   if (!StrKey.isValidEd25519PublicKey(options.serverAccountId)) {
     throw new Error(
       `sep10-auth: Invalid serverAccountId: ${options.serverAccountId}`,
@@ -163,7 +183,8 @@ export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestH
   }
   webAuthDomains.forEach((d) => assertBareDomain('webAuthDomain', d));
 
-  // ── Request handler ─────────────────────────────────────────────────────────
+  return homeDomains;
+}
 
   return async (req, res, next) => {
     // ── #38: Use parseBearerToken helper ──────────────────────────────────────
@@ -171,54 +192,153 @@ export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestH
       ? parseCustomToken(options.getToken(req))
       : parseBearerToken(req.header('Authorization') ?? '');
 
-    if (!parsed.ok) {
-      logger.warn('sep10-auth: missing or malformed bearer token', {
-        ip: req.ip,
-        path: req.path,
-      });
-      res.status(401).json({ error: 'unauthorized', reason: parsed.reason });
-      return;
-    }
+/**
+ * Synchronous half of {@link authenticateRequest}: parses the `Authorization`
+ * header and verifies the signed challenge. It does not consult the revocation
+ * store, so it can answer without yielding to the event loop.
+ */
+export function verifyRequestHeaders(
+  headers: RequestHeaders,
+  options: Sep10MiddlewareOptions,
+): AuthenticateRequestResult {
+  const maxTokenLength = options.maxTokenLength ?? DEFAULT_MAX_TOKEN_LENGTH;
+  const realm = Array.isArray(options.homeDomains) ? options.homeDomains[0] : options.homeDomains;
 
-    const token = parsed.token;
+  const fail = (
+    error: BearerErrorCode,
+    reason: string,
+    logMessage: string,
+    logContext?: Record<string, unknown>,
+  ): AuthenticateRequestResult => ({
+    ok: false,
+    error,
+    reason,
+    wwwAuthenticate: buildWwwAuthenticate(realm, error),
+    logMessage,
+    logContext,
+  });
 
-    if (token.length > maxTokenLength) {
-      logger.warn('sep10-auth: bearer token exceeds maximum length', {
-        ip: req.ip,
-        path: req.path,
-        length: token.length,
-      });
-      res.status(401).json({ error: 'unauthorized', reason: 'bearer token too large' });
-      return;
-    }
+  const rawHeader = headers.authorization ?? headers.Authorization;
+  const parsed = parseBearerToken(
+    (Array.isArray(rawHeader) ? rawHeader[0] : rawHeader) ?? '',
+  );
 
-    const result = verifyChallenge(token, options);
+  if (!parsed.ok) {
+    return fail(
+      'invalid_request',
+      parsed.reason,
+      'sep10-auth: missing or malformed bearer token',
+    );
+  }
 
-    if (!result.valid) {
-      logger.warn('sep10-auth: challenge verification failed', {
-        reason: result.error,
-        ip: req.ip,
-        path: req.path,
-      });
-      res.status(401).json({ error: 'unauthorized', reason: result.error });
-      return;
-    }
+  const token = parsed.token;
 
-    if (options.revocationStore) {
-      let revoked: boolean;
+  if (token.length > maxTokenLength) {
+    return fail(
+      'invalid_token',
+      'bearer token too large',
+      'sep10-auth: bearer token exceeds maximum length',
+      { length: token.length },
+    );
+  }
+
+  const result = verifyChallenge(token, options);
+
+  if (!result.valid) {
+    return fail(
+      'invalid_token',
+      result.error ?? 'invalid token',
+      'sep10-auth: challenge verification failed',
+      { reason: result.error },
+    );
+  }
+
+  return { ok: true, address: result.address };
+}
+
+/**
+ * Applies the optional revocation store to a successful
+ * {@link verifyRequestHeaders} result. A failed result is returned unchanged.
+ * A store lookup failure rejects, as it is an internal failure rather than an
+ * authentication failure.
+ */
+export async function applyRevocationStore(
+  result: AuthenticateRequestResult,
+  options: Sep10MiddlewareOptions,
+): Promise<AuthenticateRequestResult> {
+  if (!result.ok || !options.revocationStore) {
+    return result;
+  }
+
+  if (await options.revocationStore.isRevoked(result.address)) {
+    const realm = Array.isArray(options.homeDomains) ? options.homeDomains[0] : options.homeDomains;
+    return {
+      ok: false,
+      error: 'invalid_token',
+      reason: 'address revoked',
+      wwwAuthenticate: buildWwwAuthenticate(realm, 'invalid_token'),
+      logMessage: 'sep10-auth: address is revoked',
+      logContext: { address: result.address },
+    };
+  }
+
+  return result;
+}
+
+/**
+ * Framework-agnostic SEP-10 request authentication. Parses the `Authorization`
+ * header, verifies the signed challenge and consults the revocation store.
+ *
+ * Shared by the Express middleware ({@link createSep10Middleware}) and the
+ * Fastify plugin (`sep10-auth/fastify`). A thrown error (e.g. the revocation
+ * store being unavailable) is an internal failure, not an authentication
+ * failure, and is left for the adapter to forward to its error handler.
+ */
+export async function authenticateRequest(
+  headers: RequestHeaders,
+  options: Sep10MiddlewareOptions,
+): Promise<AuthenticateRequestResult> {
+  return applyRevocationStore(verifyRequestHeaders(headers, options), options);
+}
+
+// Reference pattern only: expects the raw signed SEP-10 challenge XDR on every
+// request via `Authorization: Bearer <base64-xdr>`. A production app would
+// typically verify once and issue a short-lived session JWT instead of
+// re-verifying the challenge transaction on every request; that is out of
+// scope for this package.
+export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestHandler {
+  const logger = options.logger ?? noopLogger;
+
+  // ── #39: Validate required configuration at construction time ──────────────
+  // Catch misconfiguration early rather than on first request.
+  assertSep10MiddlewareOptions(options);
+
+  // ── Request handler ─────────────────────────────────────────────────────────
+
+  return async (req, res, next) => {
+    let result = verifyRequestHeaders({ authorization: req.header('Authorization') }, options);
+
+    if (result.ok && options.revocationStore) {
       try {
-        revoked = await options.revocationStore.isRevoked(result.address);
+        result = await applyRevocationStore(result, options);
       } catch (error) {
         logger.error('sep10-auth: revocation store lookup failed', error);
         next(error);
         return;
       }
+    }
 
-      if (revoked) {
-        logger.warn('sep10-auth: address is revoked', { address: result.address });
-        res.status(401).json({ error: 'unauthorized', reason: 'address revoked' });
-        return;
-      }
+    if (!result.ok) {
+      logger.warn(result.logMessage, {
+        ...result.logContext,
+        ip: req.ip,
+        path: req.path,
+      });
+      res
+        .set('WWW-Authenticate', result.wwwAuthenticate)
+        .status(401)
+        .json({ error: 'unauthorized', reason: result.reason });
+      return;
     }
 
     logger.debug('sep10-auth: request authenticated', { address: result.address, path: req.path });

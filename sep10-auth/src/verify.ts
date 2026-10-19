@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { Networks, Operation, WebAuth } from '@stellar/stellar-sdk';
+import { MuxedAccount, Networks, Operation, Transaction, WebAuth } from '@stellar/stellar-sdk';
 import { assertBareDomain } from './challenge';
 import { isValidStellarAddress } from '@compliance-adapters/shared';
 
@@ -23,6 +23,58 @@ export interface VerifyChallengeOptions {
    * and `return` memos.
    */
   expectedMemo?: string;
+  /**
+   * Extra clock-skew tolerance in seconds, applied symmetrically to both
+   * timebounds (`minTime - tolerance` and `maxTime + tolerance`) on top of the
+   * 300-second grace window `WebAuth.readChallengeTx` already applies. Must be
+   * finite and non-negative; an invalid value fails verification with
+   * `INVALID_OPTIONS`. Defaults to `0` (no extra tolerance).
+   */
+  clockSkewToleranceSec?: number;
+}
+
+// Grace window WebAuth.readChallengeTx hard-codes when validating timebounds.
+const SDK_TIMEBOUNDS_GRACE_SEC = 60 * 5;
+
+/**
+ * Runs `fn` with `Date.now()` clamped into the challenge's own timebounds when the
+ * current time falls within the SDK grace window plus `toleranceSec`. The SDK
+ * offers no way to widen its grace window, so this lets the extra tolerance take
+ * effect without re-implementing challenge verification. Outside the widened
+ * window, or when the XDR cannot be parsed, `fn` runs against the real clock so
+ * the SDK reports the failure itself.
+ */
+function withClockSkewTolerance<T>(
+  signedTransactionXDR: string,
+  networkPassphrase: string,
+  toleranceSec: number,
+  fn: () => T,
+): T {
+  if (toleranceSec === 0) return fn();
+
+  let minTime: number;
+  let maxTime: number;
+  try {
+    const tx = new Transaction(signedTransactionXDR, networkPassphrase);
+    if (!tx.timeBounds) return fn();
+    minTime = Number.parseInt(tx.timeBounds.minTime, 10);
+    maxTime = Number.parseInt(tx.timeBounds.maxTime, 10);
+  } catch {
+    return fn();
+  }
+
+  const realNow = Date.now;
+  const nowSec = Math.floor(realNow() / 1000);
+  const window = SDK_TIMEBOUNDS_GRACE_SEC + toleranceSec;
+  if (nowSec < minTime - window || nowSec > maxTime + window) return fn();
+
+  const clampedSec = Math.min(Math.max(nowSec, minTime), maxTime);
+  Date.now = () => clampedSec * 1000;
+  try {
+    return fn();
+  } finally {
+    Date.now = realNow;
+  }
 }
 
 /**
@@ -35,7 +87,7 @@ export interface VerifyChallengeOptions {
  * | Code | Meaning |
  * |------|---------|
  * | `INVALID_SERVER_ACCOUNT_ID` | `serverAccountId` option is not a valid Ed25519 public key. |
- * | `INVALID_OPTIONS` | `homeDomains` or `webAuthDomain` failed format validation (bare-domain check). |
+ * | `INVALID_OPTIONS` | `homeDomains` or `webAuthDomain` failed format validation (bare-domain check), or `clockSkewToleranceSec` is negative or not finite. |
  * | `INVALID_CHALLENGE` | The XDR could not be parsed, the transaction structure is wrong, or the server signature is missing/incorrect. |
  * | `CHALLENGE_EXPIRED` | The transaction's time-bounds have lapsed (including the SDK's built-in 300-second grace window). |
  * | `WRONG_SIGNER` | The transaction was not signed by the expected client account. |
@@ -61,6 +113,12 @@ export interface VerifyResult {
   valid: boolean;
   /** The authenticated Stellar account ID (client's master key), or `''` when `valid` is `false`. */
   address: string;
+  /** The authenticated client account as signed in the challenge: a `G...` address, or a muxed `M...` address. Same value as {@link address}; empty when `valid` is `false`. */
+  account?: string;
+  /** The underlying `G...` account. Equals {@link account} unless the client account is muxed. */
+  baseAccount?: string;
+  /** The mux id (unsigned 64-bit, decimal string) of a muxed `M...` client account; absent for plain `G...` accounts. */
+  muxedId?: string;
   /**
    * The wallet's client domain, present only when the challenge included a
    * `client_domain` ManageData operation (see {@link
@@ -166,6 +224,15 @@ export function verifyChallenge(
   }
 
   const networkPassphrase = options.networkPassphrase ?? Networks.TESTNET;
+  const clockSkewToleranceSec = options.clockSkewToleranceSec ?? 0;
+  if (!Number.isFinite(clockSkewToleranceSec) || clockSkewToleranceSec < 0) {
+    return {
+      valid: false,
+      address: '',
+      error: `sep10-auth: clockSkewToleranceSec must be a finite, non-negative number, got ${clockSkewToleranceSec}`,
+      errorCode: 'INVALID_OPTIONS',
+    };
+  }
   const homeDomainList = Array.isArray(options.homeDomains)
     ? options.homeDomains
     : [options.homeDomains];
@@ -186,23 +253,36 @@ export function verifyChallenge(
 
   for (const webAuthDomain of webAuthDomains) {
     try {
-      const { clientAccountID, tx } = WebAuth.readChallengeTx(
+      const { clientAccountID, tx } = withClockSkewTolerance(
         signedTransactionXDR,
-        options.serverAccountId,
         networkPassphrase,
-        options.homeDomains,
-        webAuthDomain,
+        clockSkewToleranceSec,
+        () =>
+          WebAuth.readChallengeTx(
+            signedTransactionXDR,
+            options.serverAccountId,
+            networkPassphrase,
+            options.homeDomains,
+            webAuthDomain,
+          ),
       );
+
+      // A muxed (M...) client account is signed for by its underlying G... key.
+      const isMuxed = clientAccountID.startsWith('M');
+      const muxed = isMuxed ? MuxedAccount.fromAddress(clientAccountID, '0') : undefined;
+      const baseAccount = muxed ? muxed.baseAccount().accountId() : clientAccountID;
 
       // Also validates that the client_domain operation's source key (if any)
       // co-signed the transaction, per the SEP-10 client domain flow.
-      WebAuth.verifyChallengeTxSigners(
-        signedTransactionXDR,
-        options.serverAccountId,
-        networkPassphrase,
-        [clientAccountID],
-        options.homeDomains,
-        webAuthDomain,
+      withClockSkewTolerance(signedTransactionXDR, networkPassphrase, clockSkewToleranceSec, () =>
+        WebAuth.verifyChallengeTxSigners(
+          signedTransactionXDR,
+          options.serverAccountId,
+          networkPassphrase,
+          [baseAccount],
+          options.homeDomains,
+          webAuthDomain,
+        ),
       );
 
       if (options.expectedMemo !== undefined) {
@@ -229,6 +309,9 @@ export function verifyChallenge(
       return {
         valid: true,
         address: clientAccountID,
+        account: clientAccountID,
+        baseAccount,
+        ...(muxed ? { muxedId: muxed.id() } : {}),
         ...(clientDomain ? { clientDomain } : {}),
       };
     } catch (error) {

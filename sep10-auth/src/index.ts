@@ -8,4 +8,6 @@ export * from './verify';
 export * from './middleware';
 export * from './revocation';
 export * from './rate-limiter';
+export * from './jwt';
+export * from './router';
 export type { Logger } from '@compliance-adapters/logger';
