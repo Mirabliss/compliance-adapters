@@ -10,6 +10,13 @@ export interface RateLimiterOptions {
   maxRequests?: number;
   keyGenerator?: (req: import('express').Request) => string;
   store?: RateLimitStore;
+  /**
+   * Send the IETF draft `RateLimit-Limit`, `RateLimit-Remaining` and
+   * `RateLimit-Reset` headers on every response that passes through the
+   * limiter, allowed or throttled.
+   * @default true
+   */
+  standardHeaders?: boolean;
 }
 
 export interface RateLimitDecision {
@@ -114,6 +121,9 @@ function validatePositiveInteger(value: number, optionName: string): void {
  * { "error": "rate_limit_exceeded", "retryAfter": <seconds> }
  * ```
  *
+ * Unless `standardHeaders` is `false`, every response also carries the IETF
+ * draft `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` headers.
+ *
  * @example
  * ```ts
  * import express from 'express';
@@ -131,6 +141,7 @@ export function rateLimiter(options: RateLimiterOptions = {}): RequestHandler {
   const keyFn = options.keyGenerator ?? defaultKeyGenerator;
   validatePositiveInteger(windowMs, 'windowMs');
   validatePositiveInteger(maxRequests, 'maxRequests');
+  const standardHeaders = options.standardHeaders ?? true;
   const store = options.store ?? new InMemoryRateLimitStore();
 
   return (req, res, next) => {
@@ -138,6 +149,13 @@ export function rateLimiter(options: RateLimiterOptions = {}): RequestHandler {
     const now = Date.now();
     Promise.resolve(store.consume(key, now, windowMs, maxRequests))
       .then((decision) => {
+        if (standardHeaders) {
+          res.set({
+            'RateLimit-Limit': String(maxRequests),
+            'RateLimit-Remaining': String(Math.max(0, maxRequests - decision.count)),
+            'RateLimit-Reset': String(Math.max(0, Math.ceil((decision.resetAt - now) / 1000))),
+          });
+        }
         if (!decision.allowed) {
           const retryAfter = Math.max(
             1,

@@ -65,6 +65,57 @@ describe('rateLimiter', () => {
     expect(res.status).not.toHaveBeenCalled();
   });
 
+  describe('standardHeaders', () => {
+    function headersSetOn(r: Response): Record<string, string> {
+      return Object.assign({}, ...(r.set as jest.Mock).mock.calls.map(([h]) => (typeof h === 'object' ? h : {})));
+    }
+
+    it('sets RateLimit-* headers on allowed responses and decrements remaining', async () => {
+      const middleware = rateLimiter({ windowMs: 60_000, maxRequests: 3 });
+
+      const remaining: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const r = mockResponse();
+        await invokeMiddleware(middleware, req, r, next);
+        const h = headersSetOn(r);
+        expect(h['RateLimit-Limit']).toBe('3');
+        expect(h['RateLimit-Reset']).toBe('60');
+        remaining.push(h['RateLimit-Remaining']);
+      }
+
+      expect(remaining).toEqual(['2', '1', '0']);
+    });
+
+    it('sets RateLimit-* headers on throttled responses', async () => {
+      const middleware = rateLimiter({ windowMs: 60_000, maxRequests: 1 });
+      await invokeMiddleware(middleware, req, mockResponse(), next);
+
+      const throttled = mockResponse();
+      await invokeMiddleware(middleware, req, throttled, next);
+
+      expect(throttled.status).toHaveBeenCalledWith(429);
+      expect(headersSetOn(throttled)).toEqual(
+        expect.objectContaining({
+          'RateLimit-Limit': '1',
+          'RateLimit-Remaining': '0',
+          'RateLimit-Reset': '60',
+        }),
+      );
+    });
+
+    it('does not set RateLimit-* headers when standardHeaders is false', async () => {
+      const middleware = rateLimiter({ windowMs: 60_000, maxRequests: 1, standardHeaders: false });
+      await invokeMiddleware(middleware, req, res, next);
+
+      expect(res.set).not.toHaveBeenCalled();
+
+      const throttled = mockResponse();
+      await invokeMiddleware(middleware, req, throttled, next);
+      expect(headersSetOn(throttled)).toEqual({});
+      expect(throttled.set).toHaveBeenCalledWith('Retry-After', expect.any(String));
+    });
+  });
+
   it('blocks requests that exceed the limit and returns 429', async () => {
     const middleware = rateLimiter({ windowMs: 60_000, maxRequests: 3 });
 
