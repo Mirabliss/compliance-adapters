@@ -4,7 +4,9 @@ import {
   InvalidClientAddressError,
   InvalidDomainError,
   InvalidMemoError,
+  resolveHomeDomain,
   ServerKeypairCannotSignError,
+  UnknownHomeDomainError,
 } from '../src/challenge';
 
 describe('generateChallenge', () => {
@@ -212,5 +214,29 @@ describe('generateChallenge', () => {
         memo: '18446744073709551615',
       }),
     ).not.toThrow();
+  });
+});
+
+describe('resolveHomeDomain', () => {
+  const configured = ['example.com', 'other.example.org'];
+
+  it('returns a requested domain that is configured', () => {
+    expect(resolveHomeDomain('other.example.org', configured)).toBe('other.example.org');
+  });
+
+  it('rejects a domain that is not configured', () => {
+    expect(() => resolveHomeDomain('evil.example.net', configured)).toThrow(UnknownHomeDomainError);
+  });
+
+  it('falls back to the first configured domain when the param is missing', () => {
+    expect(resolveHomeDomain(undefined, configured)).toBe('example.com');
+    expect(resolveHomeDomain(null, configured)).toBe('example.com');
+    expect(resolveHomeDomain('', configured)).toBe('example.com');
+  });
+
+  it('accepts a single configured domain given as a string', () => {
+    expect(resolveHomeDomain(undefined, 'example.com')).toBe('example.com');
+    expect(resolveHomeDomain('example.com', 'example.com')).toBe('example.com');
+    expect(() => resolveHomeDomain('other.com', 'example.com')).toThrow(UnknownHomeDomainError);
   });
 });

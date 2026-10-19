@@ -30,6 +30,15 @@ export class InvalidDomainError extends Error {
   }
 }
 
+export class UnknownHomeDomainError extends Error {
+  constructor(requested: string, configured: string[]) {
+    super(
+      `sep10-auth: unknown home_domain "${requested}"; must be one of: ${configured.join(', ')}`,
+    );
+    this.name = 'UnknownHomeDomainError';
+  }
+}
+
 export class ServerKeypairCannotSignError extends Error {
   constructor() {
     super(
@@ -50,6 +59,31 @@ export function assertBareDomain(name: string, value: string): void {
   if (/:\/\/|\/|\s/.test(value)) {
     throw new InvalidDomainError(name, value);
   }
+}
+
+/**
+ * Resolves the SEP-10 `home_domain` request parameter against the configured
+ * home domains. A missing or empty `requested` value falls back to the first
+ * configured domain; any other value must exactly match a configured domain.
+ *
+ * @throws {@link UnknownHomeDomainError} when `requested` is not configured —
+ *   callers should respond with HTTP 400, as SEP-10 recommends.
+ */
+export function resolveHomeDomain(
+  requested: string | null | undefined,
+  configured: string | string[],
+): string {
+  const domains = Array.isArray(configured) ? configured : [configured];
+  if (domains.length === 0) {
+    throw new Error('sep10-auth: configured home domains must not be empty');
+  }
+  if (requested === undefined || requested === null || requested === '') {
+    return domains[0];
+  }
+  if (!domains.includes(requested)) {
+    throw new UnknownHomeDomainError(requested, domains);
+  }
+  return requested;
 }
 
 export interface GenerateChallengeOptions {

@@ -60,6 +60,52 @@ never checked or written — they are reported in `SyncResult.invalid`, kept
 distinct from `SyncResult.failed` (which means "the provider couldn't
 determine an answer").
 
+### Address normalization
+
+Addresses from CSV files, JSON input or REST providers may carry stray
+whitespace or lowercase letters. Every ingestion boundary (CLI input, sync
+input and `currentDenylist`, `CsvSanctionsProvider`, `MockSanctionsProvider`,
+`RestSanctionsProvider`) normalizes addresses with `normalizeStellarAddress()`
+(trim, then uppercase, exported by `@compliance-adapters/shared`) before the
+provider lookup, the cache key and the denylist write. Padded or mixed-case
+spellings of one account are checked, cached and written once, under the
+canonical address. Input that is still not a valid `G...` key after
+normalization is reported verbatim in `SyncResult.invalid`.
+
+### Delisting with `reconcile`
+
+By default sync only adds addresses. Pass `reconcile: true` together with
+`currentDenylist` (the on-chain denylist or your last snapshot) to also remove
+addresses that providers have cleared:
+
+```ts
+const result = await syncSanctionsToDenylist({
+  provider,
+  addresses,
+  writer, // must implement removeFromDenylist; createRpcDenylistWriter does
+  currentDenylist,
+  reconcile: true,
+  // dryRun: true  // preview only
+});
+// result.removed          addresses removed from the denylist
+// result.plannedRemovals  { address, source } for every cleared address (shown in dry-run)
+// result.failedRemovals   removals whose transaction failed
+```
+
+- Removals only happen when `reconcile` is enabled.
+- Every denylist address is re-checked with the provider; only addresses the
+  provider reports as **not flagged** are removed. A failed check is never
+  treated as a clearing.
+- Each removal is audit-logged with the provider source that cleared it:
+  `createRpcDenylistWriter().removeFromDenylistWithSource` calls the configured
+  `auditLogger` with `action: 'remove'`, and sync logs
+  `address removed from denylist` with the same source.
+- With `dryRun: true`, the planned removals are returned in
+  `plannedRemovals` and logged; nothing is removed.
+
+From the CLI, use `--reconcile --denylist-snapshot <path>` (a JSON array of the
+addresses currently on the denylist); combine with `--dry-run` to preview.
+
 ### Resuming an interrupted sync
 
 Pass a `SyncOptions.checkpoint` store (interface `SyncCheckpointStore`, with

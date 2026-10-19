@@ -33,6 +33,7 @@
  */
 
 import type { SanctionsProvider } from './SanctionsProvider';
+import { normalizeStellarAddress } from '@compliance-adapters/shared';
 
 /** Shape returned by the hypothetical watchlist REST API. */
 interface SanctionsApiResponse {
@@ -79,7 +80,10 @@ export class RestSanctionsProvider implements SanctionsProvider {
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
-  async checkAddress(address: string): Promise<{ flagged: boolean; source: string }> {
+  async checkAddress(rawAddress: string): Promise<{ flagged: boolean; source: string }> {
+    // Query the provider with the canonical spelling so padded / lowercase
+    // input cannot miss a match.
+    const address = normalizeStellarAddress(rawAddress);
     const url = `${this.apiBaseUrl}/check?address=${encodeURIComponent(address)}`;
 
     // AbortController-based timeout — the `timeout` property on RequestInit is

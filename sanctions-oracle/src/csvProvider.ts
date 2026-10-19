@@ -13,6 +13,7 @@
 
 import { SanctionsProvider } from './SanctionsProvider';
 import { StrKey } from '@stellar/stellar-sdk';
+import { normalizeStellarAddress } from '@compliance-adapters/shared';
 import { type Logger, consoleLogger } from '@compliance-adapters/logger';
 import * as fs from 'fs';
 
@@ -104,7 +105,7 @@ export class CsvSanctionsProvider implements SanctionsProvider {
         const fields = rows[i];
         if (fields.length === 1 && fields[0].trim() === '') continue;
 
-        const address = fields[0].trim();
+        const address = normalizeStellarAddress(fields[0]);
         if (!StrKey.isValidEd25519PublicKey(address)) {
           this.logger.warn(
             `sanctions-oracle: skipping invalid address at line ${i + 1} of ${this.csvPath}: "${address}" is not a valid Stellar G... address`,
@@ -135,7 +136,7 @@ export class CsvSanctionsProvider implements SanctionsProvider {
   }
 
   async checkAddress(address: string): Promise<{ flagged: boolean; source: string }> {
-    const sources = this.flaggedAddresses.get(address);
+    const sources = this.flaggedAddresses.get(normalizeStellarAddress(address));
     if (sources && sources.length > 0) {
       return { flagged: true, source: sources.join(',') };
     }

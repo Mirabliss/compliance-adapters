@@ -1,6 +1,11 @@
 import express from 'express';
 import { Keypair, Networks } from '@stellar/stellar-sdk';
-import { generateChallenge, createSep10Middleware } from '../../src';
+import {
+  generateChallenge,
+  createSep10Middleware,
+  resolveHomeDomain,
+  UnknownHomeDomainError,
+} from '../../src';
 
 export interface ExampleAppOptions {
   /**
@@ -11,6 +16,12 @@ export interface ExampleAppOptions {
    */
   serverKeypair?: Keypair;
   homeDomain?: string;
+  /**
+   * Home domains this server serves. A client selects one with the SEP-10
+   * `home_domain` query parameter; unknown values are rejected with 400 and a
+   * missing value falls back to the first entry. Defaults to `[homeDomain]`.
+   */
+  homeDomains?: string[];
   webAuthDomain?: string;
   networkPassphrase?: string;
 }
@@ -30,7 +41,8 @@ export interface ExampleApp {
 export function createApp(options: ExampleAppOptions = {}): ExampleApp {
   const serverKeypair = options.serverKeypair ?? Keypair.random();
   const homeDomain = options.homeDomain ?? 'example.com';
-  const webAuthDomain = options.webAuthDomain ?? homeDomain;
+  const homeDomains = options.homeDomains ?? [homeDomain];
+  const webAuthDomain = options.webAuthDomain ?? homeDomains[0];
   const networkPassphrase = options.networkPassphrase ?? Networks.TESTNET;
 
   const app = express();
@@ -45,9 +57,24 @@ export function createApp(options: ExampleAppOptions = {}): ExampleApp {
       return;
     }
 
+    const requestedHomeDomain = req.query.home_domain;
+    let resolvedHomeDomain: string;
+    try {
+      resolvedHomeDomain = resolveHomeDomain(
+        typeof requestedHomeDomain === 'string' ? requestedHomeDomain : undefined,
+        homeDomains,
+      );
+    } catch (error) {
+      if (error instanceof UnknownHomeDomainError) {
+        res.status(400).json({ error: 'unknown "home_domain" query parameter' });
+        return;
+      }
+      throw error;
+    }
+
     try {
       const challenge = generateChallenge(clientAddress, serverKeypair, {
-        homeDomain,
+        homeDomain: resolvedHomeDomain,
         webAuthDomain,
         networkPassphrase,
       });
@@ -68,7 +95,7 @@ export function createApp(options: ExampleAppOptions = {}): ExampleApp {
     createSep10Middleware({
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase,
-      homeDomains: homeDomain,
+      homeDomains,
       webAuthDomain,
     }),
     (req, res) => {

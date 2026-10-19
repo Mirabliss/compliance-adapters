@@ -68,6 +68,13 @@ export interface VerifyResult {
    * option}) and that domain's signing key co-signed the transaction.
    */
   clientDomain?: string;
+  /**
+   * Identifier of the verified token (`jti`): the hex-encoded hash of the
+   * challenge transaction. Present only when `valid` is `true`. Pass it to
+   * `RevocationStore.revokeToken` to sign out one session without affecting
+   * the address's other sessions.
+   */
+  jti?: string;
   /** Human-readable reason verification failed, present only when `valid` is `false`. */
   error?: string;
   /**
@@ -229,6 +236,7 @@ export function verifyChallenge(
       return {
         valid: true,
         address: clientAccountID,
+        jti: tx.hash().toString('hex'),
         ...(clientDomain ? { clientDomain } : {}),
       };
     } catch (error) {
