@@ -440,3 +440,31 @@ operator environment.
 - [`compliance-primitives`](https://github.com/stellar-compliance-kit/compliance-primitives) —
   the on-chain `denylist-gate` and `allowlist-token` Soroban contracts this
   package listens to events from.
+
+## Concurrent event processing
+
+```ts
+new HorizonListener({ eventSource, onEvent, concurrency: 8, orderingKey: 'contract' });
+```
+
+Events from different contracts run in parallel (up to `concurrency`); events from the same contract stay in order. The cursor advances only after the whole page is processed, and the next page isn't fetched until then (backpressure). Use `orderingKey: 'none'` to drop ordering entirely.
+
+## Webhook custom headers, mTLS and error bodies
+
+```ts
+import { readFileSync } from 'node:fs';
+
+new HttpWebhookSender({
+  url: 'https://receiver.example.com/hook',
+  headers: { 'X-Api-Key': process.env.API_KEY!, 'X-Tenant-Id': 'acme' },
+  tls: {
+    cert: readFileSync('client.crt'),
+    key: readFileSync('client.key'),
+    ca: readFileSync('ca.crt'),
+  },
+});
+```
+
+- `headers` are merged under the reserved `Content-Type`, `X-Signature`, `X-Timestamp` and `traceparent` headers, which can't be overridden.
+- `tls` requires the `undici` package (`npm i undici`); alternatively pass your own `dispatcher`.
+- Non-2xx response bodies are included in `WebhookHttpError` messages, capped at 2 KB with control characters stripped and a `…[truncated N chars]` marker.
