@@ -27,9 +27,17 @@ fill in the `SEP10_*` variables before running the package locally:
 | `SEP10_SERVER_PUBLIC_KEY` | Corresponding public key (used as `serverAccountId`) |
 | `SEP10_HOME_DOMAIN` | Home domain embedded in challenge transactions |
 | `SEP10_WEB_AUTH_DOMAIN` | Web-auth domain (often the same as `SEP10_HOME_DOMAIN`) |
-| `SEP10_TIMEOUT_SECONDS` | Challenge lifetime in seconds (default `300`) |
+| `SEP10_TIMEOUT_SECONDS` | Challenge lifetime in seconds, passed as `timeoutSec` (default `900`, maximum `3600`) |
 
 See the comments in `.env.example` for allowed values and testnet guidance.
+
+## Which SEP covers which account type
+
+| Account type | Standard | API |
+|---|---|---|
+| Classic `G...` account | [SEP-10](https://stellar.org/protocol/sep-10) | `generateChallenge` / `verifyChallenge` |
+| Muxed `M...` account (SEP-10 v3) | [SEP-10](https://stellar.org/protocol/sep-10) | `generateChallenge` / `verifyChallenge` |
+| Soroban contract account `C...` | [SEP-45](https://stellar.org/protocol/sep-45) (prototype) | `generateContractChallenge` / `verifyContractChallenge`, see [SEP-45 prototype](#sep-45-prototype-contract-accounts) |
 
 ## API
 
@@ -47,11 +55,20 @@ const challenge = generateChallenge(clientAddress, serverKeypair, {
   homeDomain: 'example.com',
   webAuthDomain: 'auth.example.com',
   networkPassphrase: Networks.PUBLIC,
-  timeoutSeconds: 300,
+  timeoutSec: 300,
 });
 
 // send challenge.transactionXDR to the client to sign
 ```
+
+`timeoutSec` is the challenge validity window in seconds. It defaults to `900`
+and must be finite, greater than `0` and at most `3600`; any other value throws
+`InvalidTimeoutError`. The older `timeoutSeconds` option is a deprecated alias
+and is validated the same way.
+
+`clientAddress` may be a muxed `M...` address (SEP-10 v3), which lets custodial
+wallets identify sub-users. A muxed account cannot be combined with `memo`;
+doing so throws `MemoWithMuxedAccountError`.
 
 To support the SEP-10 client domain flow (where a wallet's client-domain
 server co-signs the challenge), pass `clientDomain` along with the
@@ -89,6 +106,61 @@ if (result.valid) {
   // result.error describes why verification failed
 }
 ```
+
+For a muxed client account, `result.account` is the `M...` address,
+`result.baseAccount` is the underlying `G...` account and `result.muxedId` is
+the mux id (decimal string). For a plain `G...` account `account` and
+`baseAccount` are equal and `muxedId` is absent.
+
+#### `clockSkewToleranceSec`
+
+`WebAuth.readChallengeTx` already tolerates 300 seconds of clock drift on each
+timebound. Set `clockSkewToleranceSec` to widen that window symmetrically
+(`minTime - tolerance` and `maxTime + tolerance`) for clients and servers whose
+clocks drift further apart:
+
+```ts
+verifyChallenge(signedXDR, {
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'auth.example.com',
+  clockSkewToleranceSec: 120, // default 0: no tolerance beyond the SDK's own
+});
+```
+
+It must be finite and non-negative; otherwise verification fails with
+`INVALID_OPTIONS`.
+
+### SEP-45 prototype (contract accounts)
+
+`generateContractChallenge` and `verifyContractChallenge` authenticate Soroban
+contract accounts (`C...`) with authorization entries for the anchor's
+`web_auth_verify` contract function instead of a `manage_data` transaction.
+They live in a separate module that is not re-exported from the package index,
+so the SEP-10 surface is unchanged:
+
+```ts
+import { generateContractChallenge, verifyContractChallenge } from 'sep10-auth/dist/sep45';
+
+const challenge = await generateContractChallenge(clientContractId, serverKeypair, {
+  webAuthContractId,
+  validUntilLedger: currentLedger + 100,
+  homeDomain: 'example.com',
+});
+// send challenge.authorizationEntries; the client signs its entry and returns both
+
+const result = await verifyContractChallenge(signedEntries, {
+  webAuthContractId,
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'example.com',
+  currentLedger,
+  verifyClientAuthorization: (clientEntry) => simulateWebAuthVerify(clientEntry),
+});
+```
+
+See [`docs/sep45-design.md`](../docs/sep45-design.md) for the flow and the
+prototype's limits.
 
 ### `createSep10Middleware(options)`
 

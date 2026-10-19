@@ -1,5 +1,5 @@
 ///<reference types="jest" />
-import { Keypair, Networks, Transaction } from '@stellar/stellar-sdk';
+import { Account, Keypair, MuxedAccount, Networks, Transaction } from '@stellar/stellar-sdk';
 import { generateChallenge } from '../src/challenge';
 import { verifyChallenge, VerifyErrorCode } from '../src/verify';
 
@@ -503,3 +503,122 @@ describe('verifyChallenge — expectedMemo (#40)', () => {
     expect(result.error).toContain('"200"');
   });
 });
+
+describe('verifyChallenge muxed client accounts', () => {
+  it('round-trips an M-address and exposes account, muxedId and baseAccount', () => {
+    const serverKeypair = Keypair.random();
+    const clientKeypair = Keypair.random();
+    const muxedAddress = new MuxedAccount(new Account(clientKeypair.publicKey(), '0'), '987654321').accountId();
+
+    const challenge = generateChallenge(muxedAddress, serverKeypair, {
+      homeDomain,
+      webAuthDomain: homeDomain,
+    });
+    const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
+
+    const result = verifyChallenge(signedXDR, {
+      serverAccountId: serverKeypair.publicKey(),
+      homeDomains: homeDomain,
+      webAuthDomain: homeDomain,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.account).toBe(muxedAddress);
+    expect(result.address).toBe(muxedAddress);
+    expect(result.baseAccount).toBe(clientKeypair.publicKey());
+    expect(result.muxedId).toBe('987654321');
+  });
+
+  it('reports a plain G-address with baseAccount and no muxedId', () => {
+    const serverKeypair = Keypair.random();
+    const clientKeypair = Keypair.random();
+    const challenge = generateChallenge(clientKeypair.publicKey(), serverKeypair, {
+      homeDomain,
+      webAuthDomain: homeDomain,
+    });
+    const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
+
+    const result = verifyChallenge(signedXDR, {
+      serverAccountId: serverKeypair.publicKey(),
+      homeDomains: homeDomain,
+      webAuthDomain: homeDomain,
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.account).toBe(clientKeypair.publicKey());
+    expect(result.baseAccount).toBe(clientKeypair.publicKey());
+    expect(result.muxedId).toBeUndefined();
+  });
+});
+
+describe('verifyChallenge clockSkewToleranceSec', () => {
+  const T0 = 1700000000000; // whole second, so minTime === T0 / 1000 exactly
+  const TIMEOUT = 60;
+  const SDK_GRACE = 300;
+
+  function setup() {
+    jest.useFakeTimers();
+    jest.setSystemTime(T0);
+    const serverKeypair = Keypair.random();
+    const clientKeypair = Keypair.random();
+    const challenge = generateChallenge(clientKeypair.publicKey(), serverKeypair, {
+      homeDomain,
+      webAuthDomain: homeDomain,
+      timeoutSec: TIMEOUT,
+    });
+    const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
+    const verify = (clockSkewToleranceSec?: number) =>
+      verifyChallenge(signedXDR, {
+        serverAccountId: serverKeypair.publicKey(),
+        homeDomains: homeDomain,
+        webAuthDomain: homeDomain,
+        clockSkewToleranceSec,
+      });
+    return { verify, clientKeypair };
+  }
+
+  afterEach(() => jest.useRealTimers());
+
+  it('defaults to no extra tolerance beyond the SDK grace window (maxTime)', () => {
+    const { verify } = setup();
+    jest.setSystemTime(T0 + (TIMEOUT + SDK_GRACE + 1) * 1000);
+    expect(verify().valid).toBe(false);
+    expect(verify(0).valid).toBe(false);
+  });
+
+  it('extends the maxTime boundary by the tolerance, inclusively', () => {
+    const { verify, clientKeypair } = setup();
+    jest.setSystemTime(T0 + (TIMEOUT + SDK_GRACE + 120) * 1000);
+    const atBoundary = verify(120);
+    expect(atBoundary.valid).toBe(true);
+    expect(atBoundary.address).toBe(clientKeypair.publicKey());
+
+    jest.setSystemTime(T0 + (TIMEOUT + SDK_GRACE + 121) * 1000);
+    expect(verify(120).valid).toBe(false);
+  });
+
+  it('extends the minTime boundary by the tolerance, inclusively', () => {
+    const { verify } = setup();
+    jest.setSystemTime(T0 - (SDK_GRACE + 100) * 1000);
+    expect(verify(0).valid).toBe(false);
+    expect(verify(100).valid).toBe(true);
+
+    jest.setSystemTime(T0 - (SDK_GRACE + 101) * 1000);
+    expect(verify(100).valid).toBe(false);
+  });
+
+  it('restores Date.now after verification', () => {
+    const { verify } = setup();
+    jest.setSystemTime(T0 + (TIMEOUT + SDK_GRACE + 50) * 1000);
+    verify(100);
+    expect(Date.now()).toBe(T0 + (TIMEOUT + SDK_GRACE + 50) * 1000);
+  });
+
+  it.each([-1, NaN, Infinity])('rejects clockSkewToleranceSec = %p with INVALID_OPTIONS', (value) => {
+    const { verify } = setup();
+    const result = verify(value);
+    expect(result.valid).toBe(false);
+    expect(result.errorCode).toBe('INVALID_OPTIONS');
+  });
+});
+
