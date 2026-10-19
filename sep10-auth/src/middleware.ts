@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { RequestHandler } from 'express';
+import { Request, RequestHandler } from 'express';
 import { StrKey } from '@stellar/stellar-sdk';
 import { type Logger, noopLogger } from '@compliance-adapters/logger';
 import { verifyChallenge, VerifyChallengeOptions } from './verify';
@@ -93,6 +93,10 @@ export function parseBearerToken(header: string): ParseBearerTokenResult {
   return { ok: true, token };
 }
 
+function parseCustomToken(token: string | undefined): ParseBearerTokenResult {
+  return token ? { ok: true, token } : { ok: false, reason: 'missing bearer token' };
+}
+
 export interface Sep10MiddlewareOptions extends VerifyChallengeOptions {
   /**
    * Optional store consulted after a challenge verifies successfully, to
@@ -109,6 +113,18 @@ export interface Sep10MiddlewareOptions extends VerifyChallengeOptions {
    * @default 8192
    */
   maxTokenLength?: number;
+  /**
+   * Custom token extractor, e.g. to read the token from a cookie or query
+   * parameter instead of the `Authorization: Bearer` header. Return
+   * `undefined` (or an empty string) when the request carries no token; the
+   * request is then rejected with 401. When omitted, the token is read from
+   * the `Authorization` header as a Bearer token.
+   *
+   * Cookie-based extraction exposes the endpoint to CSRF: browsers attach
+   * cookies automatically, so pair it with SameSite cookies and/or a CSRF
+   * token check.
+   */
+  getToken?: (req: Request) => string | undefined;
 }
 
 const DEFAULT_MAX_TOKEN_LENGTH = 8192;
@@ -151,7 +167,9 @@ export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestH
 
   return async (req, res, next) => {
     // ── #38: Use parseBearerToken helper ──────────────────────────────────────
-    const parsed = parseBearerToken(req.header('Authorization') ?? '');
+    const parsed: ParseBearerTokenResult = options.getToken
+      ? parseCustomToken(options.getToken(req))
+      : parseBearerToken(req.header('Authorization') ?? '');
 
     if (!parsed.ok) {
       logger.warn('sep10-auth: missing or malformed bearer token', {

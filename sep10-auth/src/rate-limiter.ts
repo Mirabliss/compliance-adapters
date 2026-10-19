@@ -10,6 +10,12 @@ export interface RateLimiterOptions {
   maxRequests?: number;
   keyGenerator?: (req: import('express').Request) => string;
   store?: RateLimitStore;
+  /**
+   * Return `true` (or a promise resolving to `true`) to exempt a request from
+   * rate limiting, e.g. internal health checkers or trusted partner IPs.
+   * Skipped requests never consume tokens.
+   */
+  skip?: (req: import('express').Request) => boolean | Promise<boolean>;
 }
 
 export interface RateLimitDecision {
@@ -133,7 +139,9 @@ export function rateLimiter(options: RateLimiterOptions = {}): RequestHandler {
   validatePositiveInteger(maxRequests, 'maxRequests');
   const store = options.store ?? new InMemoryRateLimitStore();
 
-  return (req, res, next) => {
+  const skip = options.skip;
+
+  const consume: RequestHandler = (req, res, next) => {
     const key = keyFn(req);
     const now = Date.now();
     Promise.resolve(store.consume(key, now, windowMs, maxRequests))
@@ -152,5 +160,13 @@ export function rateLimiter(options: RateLimiterOptions = {}): RequestHandler {
         next();
       })
       .catch(next);
+  };
+
+  if (!skip) return consume;
+
+  return (req, res, next) => {
+    Promise.resolve()
+      .then(() => skip(req))
+      .then((skipped) => (skipped ? next() : consume(req, res, next)), next);
   };
 }

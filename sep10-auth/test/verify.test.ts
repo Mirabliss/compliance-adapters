@@ -1,5 +1,6 @@
 ///<reference types="jest" />
-import { Keypair, Networks, Transaction } from '@stellar/stellar-sdk';
+import { randomBytes } from 'crypto';
+import { Account, Keypair, Networks, Operation, Transaction, TransactionBuilder } from '@stellar/stellar-sdk';
 import { generateChallenge } from '../src/challenge';
 import { verifyChallenge, VerifyErrorCode } from '../src/verify';
 
@@ -501,5 +502,79 @@ describe('verifyChallenge — expectedMemo (#40)', () => {
     const result = verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '200' });
     expect(result.valid).toBe(false);
     expect(result.error).toContain('"200"');
+  });
+});
+
+describe('verifyChallenge - first operation source must be the client', () => {
+  // Builds a server-signed challenge by hand so the first manage_data op's
+  // source can be set to an arbitrary account, then has the intended client
+  // sign it.
+  function buildChallengeWithFirstOpSource(
+    serverKeypair: Keypair,
+    clientKeypair: Keypair,
+    firstOpSource: string,
+  ): string {
+    const now = Math.floor(Date.now() / 1000);
+    const tx = new TransactionBuilder(new Account(serverKeypair.publicKey(), '-1'), {
+      fee: '100',
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: now, maxTime: now + 300 },
+    })
+      .addOperation(
+        Operation.manageData({
+          name: `${homeDomain} auth`,
+          value: Buffer.from(randomBytes(48).toString('base64')),
+          source: firstOpSource,
+        }),
+      )
+      .addOperation(
+        Operation.manageData({
+          name: 'web_auth_domain',
+          value: homeDomain,
+          source: serverKeypair.publicKey(),
+        }),
+      )
+      .build();
+    tx.sign(serverKeypair);
+    tx.sign(clientKeypair);
+    return tx.toXDR();
+  }
+
+  const verifyFor = (serverKeypair: Keypair, xdr: string) =>
+    verifyChallenge(xdr, {
+      serverAccountId: serverKeypair.publicKey(),
+      networkPassphrase: Networks.TESTNET,
+      homeDomains: homeDomain,
+      webAuthDomain: homeDomain,
+    });
+
+  it('rejects a challenge whose first operation source is the server', () => {
+    const serverKeypair = Keypair.random();
+    const clientKeypair = Keypair.random();
+    const xdr = buildChallengeWithFirstOpSource(
+      serverKeypair,
+      clientKeypair,
+      serverKeypair.publicKey(),
+    );
+
+    const result = verifyFor(serverKeypair, xdr);
+
+    expect(result.valid).toBe(false);
+    expect(result.address).toBe('');
+  });
+
+  it('rejects a challenge whose first operation source is a third-party key', () => {
+    const serverKeypair = Keypair.random();
+    const clientKeypair = Keypair.random();
+    const xdr = buildChallengeWithFirstOpSource(
+      serverKeypair,
+      clientKeypair,
+      Keypair.random().publicKey(),
+    );
+
+    const result = verifyFor(serverKeypair, xdr);
+
+    expect(result.valid).toBe(false);
+    expect(result.address).toBe('');
   });
 });
