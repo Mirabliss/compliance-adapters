@@ -320,6 +320,7 @@ app.use(
 | `windowMs` | `60000` (1 minute) | Sliding window length in milliseconds. Must be a positive integer. |
 | `maxRequests` | `100` | Maximum requests allowed inside the window for one key. Must be a positive integer. |
 | `keyGenerator` | `req.ip`, then `req.socket.remoteAddress`, then `"unknown"` | Returns the counter key for a request. |
+| `skip` | `undefined` | `(req) => boolean \| Promise<boolean>`. Return `true` to exempt a request (e.g. internal health checkers or trusted partner IPs). Skipped requests never consume tokens. Async predicates are supported. |
 | `store` | `InMemoryRateLimitStore` | A pluggable backend implementing `RateLimitStore` (`consume(key, now, windowMs, maxRequests)`) for local or distributed counters (e.g. Redis). |
 | `standardHeaders` | `true` | Send the IETF draft `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` headers on every response that passes through the limiter, allowed or throttled. Set to `false` to turn them off. |
 
@@ -354,8 +355,29 @@ value.
 | `networkPassphrase` | `string` | `Networks.TESTNET` | Stellar network passphrase. |
 | `expectedMemo` | `string` | `undefined` | Optional memo that must match the challenge memo. |
 | `maxTokenLength` | `number` | `8192` | Maximum accepted length (in characters) of the bearer token, rejected with `401` (`"bearer token too large"`) before XDR parsing is attempted. Guards against unauthenticated callers forcing expensive XDR-parsing work with oversized input. |
+| `getToken` | `(req) => string \| undefined` | Bearer header parsing | Custom token extractor (e.g. cookie or query parameter). Return `undefined` when no token is present and the request is rejected with `401`. See the CSRF note below. |
 | `revocationStore` | `RevocationStore` | `undefined` | Optional store consulted after challenge verification to reject revoked addresses before `timeoutSeconds` expires. |
 | `logger` | `Logger` | `noopLogger` | Injectable logger (`debug`, `info`, `warn`, `error`) for auth and revocation observability. |
+
+#### Custom token extraction and CSRF
+
+Browser apps often keep the session token in an HttpOnly cookie instead of an
+`Authorization` header. Pass `getToken` to read it from there:
+
+```ts
+createSep10Middleware({
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'auth.example.com',
+  getToken: (req) => req.cookies?.sep10_token,
+});
+```
+
+Browsers attach cookies to cross-site requests automatically, so cookie-based
+extraction exposes state-changing endpoints to CSRF. Mitigate it with
+`SameSite=Strict` (or `Lax`) cookies and a CSRF token or `Origin` header check.
+Avoid query-parameter tokens where possible: they leak into logs and referrers.
+The default behaviour (Bearer header) is unchanged.
 
 ### Session revocation (`revocationStore`)
 

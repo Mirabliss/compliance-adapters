@@ -274,4 +274,59 @@ describe('rateLimiter', () => {
     expect(res.status).toHaveBeenCalledWith(429);
     expect(consume).toHaveBeenCalledTimes(2);
   });
+
+  describe('skip predicate', () => {
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    }
+
+    it('lets skipped requests through without consuming tokens', async () => {
+      const store: RateLimitStore = { consume: jest.fn() };
+      const middleware = rateLimiter({ store, skip: () => true });
+
+      middleware(req, res, next);
+      await settle();
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(store.consume).not.toHaveBeenCalled();
+      expect(res.status).not.toHaveBeenCalled();
+    });
+
+    it('supports async predicates', async () => {
+      const middleware = rateLimiter({
+        maxRequests: 1,
+        skip: async (r) => r.ip === '10.0.0.1',
+      });
+      const trusted = mockRequest({ ip: '10.0.0.1' });
+
+      for (let i = 0; i < 3; i++) {
+        middleware(trusted, res, next);
+        await settle();
+      }
+      expect(next).toHaveBeenCalledTimes(3);
+      expect(res.status).not.toHaveBeenCalled();
+
+      // Non-skipped requests are still rate limited.
+      middleware(req, res, next);
+      await settle();
+      middleware(req, res, next);
+      await settle();
+      expect(next).toHaveBeenCalledTimes(4);
+      expect(res.status).toHaveBeenCalledWith(429);
+    });
+
+    it('forwards predicate errors to next', async () => {
+      const error = new Error('predicate failed');
+      const middleware = rateLimiter({
+        skip: () => {
+          throw error;
+        },
+      });
+
+      middleware(req, res, next);
+      await settle();
+
+      expect(next).toHaveBeenCalledWith(error);
+    });
+  });
 });

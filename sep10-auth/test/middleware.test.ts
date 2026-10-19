@@ -462,3 +462,45 @@ describe('createSep10Middleware - construction-time option validation (#39)', ()
     ).not.toThrow();
   });
 });
+
+describe('createSep10Middleware - custom token extractor (#772)', () => {
+  it('uses the custom extractor instead of the Authorization header', async () => {
+    const spy = jest
+      .spyOn(verifyModule, 'verifyChallenge')
+      .mockReturnValue({ valid: true, address: 'GCLIENT' });
+    const getToken = jest.fn().mockReturnValue('cookie-token');
+    const middleware = createSep10Middleware({ ...options, getToken });
+    const req = makeReq(undefined);
+    const next = jest.fn();
+
+    await middleware(req, makeRes(), next as unknown as NextFunction);
+
+    expect(getToken).toHaveBeenCalledWith(req);
+    expect(spy).toHaveBeenCalledWith('cookie-token', expect.anything());
+    expect(next).toHaveBeenCalledWith();
+    spy.mockRestore();
+  });
+
+  it('responds 401 when the custom extractor returns no token', async () => {
+    const middleware = createSep10Middleware({ ...options, getToken: () => undefined });
+    const res = makeRes();
+    const next = jest.fn();
+
+    await middleware(makeReq('Bearer ignored'), res, next as unknown as NextFunction);
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('keeps parsing the Bearer header when no extractor is provided', async () => {
+    const spy = jest
+      .spyOn(verifyModule, 'verifyChallenge')
+      .mockReturnValue({ valid: true, address: 'GCLIENT' });
+    const next = jest.fn();
+
+    await createSep10Middleware(options)(makeReq('Bearer abc'), makeRes(), next as unknown as NextFunction);
+
+    expect(spy).toHaveBeenCalledWith('abc', expect.anything());
+    spy.mockRestore();
+  });
+});
