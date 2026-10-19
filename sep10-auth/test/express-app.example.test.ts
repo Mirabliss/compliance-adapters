@@ -28,20 +28,20 @@ function makeApp() {
 }
 
 describe('SEP-10 express-app example', () => {
-  describe('GET /challenge', () => {
-    it('returns 400 when the address query parameter is missing', async () => {
+  describe('GET /auth', () => {
+    it('returns 400 when the account query parameter is missing', async () => {
       const { app } = makeApp();
 
-      const res = await request(app).get('/challenge');
+      const res = await request(app).get('/auth');
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toMatch(/address/i);
+      expect(res.body.error).toMatch(/account/i);
     });
 
-    it('returns 400 when the address query parameter is not a valid Stellar key', async () => {
+    it('returns 400 when the account query parameter is not a valid Stellar key', async () => {
       const { app } = makeApp();
 
-      const res = await request(app).get('/challenge').query({ address: 'not-a-key' });
+      const res = await request(app).get('/auth').query({ account: 'not-a-key' });
 
       expect(res.status).toBe(400);
     });
@@ -79,7 +79,7 @@ describe('SEP-10 express-app example', () => {
       const { app } = makeApp();
       const client = Keypair.random();
 
-      const res = await request(app).get('/challenge').query({ address: client.publicKey() });
+      const res = await request(app).get('/auth').query({ account: client.publicKey() });
 
       expect(res.status).toBe(200);
       expect(typeof res.body.transaction).toBe('string');
@@ -119,8 +119,8 @@ describe('SEP-10 express-app example', () => {
 
       // 1. Request a challenge.
       const challengeRes = await request(app)
-        .get('/challenge')
-        .query({ address: client.publicKey() });
+        .get('/auth')
+        .query({ account: client.publicKey() });
       expect(challengeRes.status).toBe(200);
 
       // 2. Sign it with the client's key, exactly as a wallet would.
@@ -146,8 +146,8 @@ describe('SEP-10 express-app example', () => {
       const attacker = Keypair.random();
 
       const challengeRes = await request(app)
-        .get('/challenge')
-        .query({ address: client.publicKey() });
+        .get('/auth')
+        .query({ account: client.publicKey() });
 
       const tx = new Transaction(
         challengeRes.body.transaction,

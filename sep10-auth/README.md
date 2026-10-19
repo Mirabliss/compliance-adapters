@@ -27,9 +27,17 @@ fill in the `SEP10_*` variables before running the package locally:
 | `SEP10_SERVER_PUBLIC_KEY` | Corresponding public key (used as `serverAccountId`) |
 | `SEP10_HOME_DOMAIN` | Home domain embedded in challenge transactions |
 | `SEP10_WEB_AUTH_DOMAIN` | Web-auth domain (often the same as `SEP10_HOME_DOMAIN`) |
-| `SEP10_TIMEOUT_SECONDS` | Challenge lifetime in seconds (default `300`) |
+| `SEP10_TIMEOUT_SECONDS` | Challenge lifetime in seconds, passed as `timeoutSec` (default `900`, maximum `3600`) |
 
 See the comments in `.env.example` for allowed values and testnet guidance.
+
+## Which SEP covers which account type
+
+| Account type | Standard | API |
+|---|---|---|
+| Classic `G...` account | [SEP-10](https://stellar.org/protocol/sep-10) | `generateChallenge` / `verifyChallenge` |
+| Muxed `M...` account (SEP-10 v3) | [SEP-10](https://stellar.org/protocol/sep-10) | `generateChallenge` / `verifyChallenge` |
+| Soroban contract account `C...` | [SEP-45](https://stellar.org/protocol/sep-45) (prototype) | `generateContractChallenge` / `verifyContractChallenge`, see [SEP-45 prototype](#sep-45-prototype-contract-accounts) |
 
 ## API
 
@@ -47,11 +55,20 @@ const challenge = generateChallenge(clientAddress, serverKeypair, {
   homeDomain: 'example.com',
   webAuthDomain: 'auth.example.com',
   networkPassphrase: Networks.PUBLIC,
-  timeoutSeconds: 300,
+  timeoutSec: 300,
 });
 
 // send challenge.transactionXDR to the client to sign
 ```
+
+`timeoutSec` is the challenge validity window in seconds. It defaults to `900`
+and must be finite, greater than `0` and at most `3600`; any other value throws
+`InvalidTimeoutError`. The older `timeoutSeconds` option is a deprecated alias
+and is validated the same way.
+
+`clientAddress` may be a muxed `M...` address (SEP-10 v3), which lets custodial
+wallets identify sub-users. A muxed account cannot be combined with `memo`;
+doing so throws `MemoWithMuxedAccountError`.
 
 To support the SEP-10 client domain flow (where a wallet's client-domain
 server co-signs the challenge), pass `clientDomain` along with the
@@ -115,6 +132,61 @@ if (result.valid) {
 }
 ```
 
+For a muxed client account, `result.account` is the `M...` address,
+`result.baseAccount` is the underlying `G...` account and `result.muxedId` is
+the mux id (decimal string). For a plain `G...` account `account` and
+`baseAccount` are equal and `muxedId` is absent.
+
+#### `clockSkewToleranceSec`
+
+`WebAuth.readChallengeTx` already tolerates 300 seconds of clock drift on each
+timebound. Set `clockSkewToleranceSec` to widen that window symmetrically
+(`minTime - tolerance` and `maxTime + tolerance`) for clients and servers whose
+clocks drift further apart:
+
+```ts
+verifyChallenge(signedXDR, {
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'auth.example.com',
+  clockSkewToleranceSec: 120, // default 0: no tolerance beyond the SDK's own
+});
+```
+
+It must be finite and non-negative; otherwise verification fails with
+`INVALID_OPTIONS`.
+
+### SEP-45 prototype (contract accounts)
+
+`generateContractChallenge` and `verifyContractChallenge` authenticate Soroban
+contract accounts (`C...`) with authorization entries for the anchor's
+`web_auth_verify` contract function instead of a `manage_data` transaction.
+They live in a separate module that is not re-exported from the package index,
+so the SEP-10 surface is unchanged:
+
+```ts
+import { generateContractChallenge, verifyContractChallenge } from 'sep10-auth/dist/sep45';
+
+const challenge = await generateContractChallenge(clientContractId, serverKeypair, {
+  webAuthContractId,
+  validUntilLedger: currentLedger + 100,
+  homeDomain: 'example.com',
+});
+// send challenge.authorizationEntries; the client signs its entry and returns both
+
+const result = await verifyContractChallenge(signedEntries, {
+  webAuthContractId,
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'example.com',
+  currentLedger,
+  verifyClientAuthorization: (clientEntry) => simulateWebAuthVerify(clientEntry),
+});
+```
+
+See [`docs/sep45-design.md`](../docs/sep45-design.md) for the flow and the
+prototype's limits.
+
 ### `createSep10Middleware(options)`
 
 An Express middleware factory. Expects the signed challenge transaction XDR on
@@ -141,9 +213,85 @@ app.get('/compliance/status', (req, res) => {
 });
 ```
 
+Every `401` response carries an RFC 6750 `WWW-Authenticate` header, e.g.
+`Bearer realm="example.com", error="invalid_token"`. The `realm` is the first
+configured home domain; `error` is `invalid_request` when the `Authorization`
+header is missing or malformed, and `invalid_token` when the token is too
+large, fails verification or belongs to a revoked address.
+
 This is a reference pattern: it re-verifies the raw challenge transaction on
 every request. A production deployment would typically verify once and issue
 a short-lived session token instead — that's out of scope for this package.
+
+### `sep10Plugin` (Fastify)
+
+A Fastify plugin, imported from `sep10-auth/fastify`, that shares its
+authentication logic with `createSep10Middleware` through
+`authenticateRequest(headers, options)` and decorates `request.stellarAddress`.
+It takes the same options as `createSep10Middleware` plus `global`. `fastify`
+and `fastify-plugin` are optional peer dependencies.
+
+```ts
+import Fastify from 'fastify';
+import { sep10Plugin } from 'sep10-auth/fastify';
+
+const app = Fastify();
+await app.register(sep10Plugin, {
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'auth.example.com',
+});
+
+app.get('/compliance/status', async (request) => ({ address: request.stellarAddress }));
+```
+
+By default every route in the scope is authenticated. Pass `global: false` to
+only decorate `fastify.sep10Authenticate` and attach it to individual routes
+with `{ preHandler: app.sep10Authenticate }`. `401` responses match the Express
+adapter, including the `WWW-Authenticate` header.
+
+### `createSep10Router(options)`
+
+An Express `Router` implementing the SEP-10 endpoints, guarded by the built-in
+`rateLimiter`:
+
+- `GET /auth?account=...&home_domain=...&client_domain=...&memo=...` responds
+  `{ "transaction": "...", "network_passphrase": "..." }`.
+- `POST /auth` with `{ "transaction": "<signed XDR>" }` (JSON or form-encoded)
+  responds `{ "token": "<jwt>" }`.
+
+Failures respond `{ "error": "<message>" }` with `400` (invalid request or
+challenge) or `429` (rate limited).
+
+```ts
+import express from 'express';
+import { createSep10Router } from 'sep10-auth';
+
+const app = express();
+app.use(
+  createSep10Router({
+    serverKeypair,
+    homeDomain: 'example.com',
+    jwtSecret: process.env.SEP10_JWT_SECRET!,
+  })
+);
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `serverKeypair` | *(required)* | Keypair that signs challenge transactions. |
+| `homeDomain` | *(required)* | Home domain(s). The first is the default when `home_domain` is omitted. |
+| `webAuthDomain` | first home domain | Web-auth domain(s) embedded in challenges. |
+| `networkPassphrase` | `Networks.TESTNET` | Stellar network passphrase. |
+| `challengeTimeoutSeconds` | `300` | Challenge lifetime. |
+| `rateLimit` | `{}` | Options for the built-in `rateLimiter`, or `false` to disable it. |
+| `jwtSecret` | — | HMAC secret for the built-in HS256 JWT issuer (`issueJwt`). Required unless `issueToken` is set. |
+| `jwtExpiresInSeconds` | `86400` | Lifetime of issued tokens. |
+| `jwtIssuer` | `https://<first home domain>` | The JWT `iss` claim. |
+| `issueToken` | — | Replaces the built-in JWT issuer: `(account, { clientDomain, transaction }) => string \| Promise<string>`. |
+| `resolveClientSigningKey` | — | Resolves a `client_domain`'s `SIGNING_KEY`. Without it, requests with `client_domain` get `400`. |
+| `maxTransactionLength` | `8192` | Maximum accepted length of the posted transaction. |
+| `logger` | `noopLogger` | Injectable logger. |
 
 ### `rateLimiter(options?)`
 
@@ -197,7 +345,13 @@ app.use(
 | `windowMs` | `60000` (1 minute) | Sliding window length in milliseconds. Must be a positive integer. |
 | `maxRequests` | `100` | Maximum requests allowed inside the window for one key. Must be a positive integer. |
 | `keyGenerator` | `req.ip`, then `req.socket.remoteAddress`, then `"unknown"` | Returns the counter key for a request. |
+| `skip` | `undefined` | `(req) => boolean \| Promise<boolean>`. Return `true` to exempt a request (e.g. internal health checkers or trusted partner IPs). Skipped requests never consume tokens. Async predicates are supported. |
 | `store` | `InMemoryRateLimitStore` | A pluggable backend implementing `RateLimitStore` (`consume(key, now, windowMs, maxRequests)`) for local or distributed counters (e.g. Redis). |
+| `standardHeaders` | `true` | Send the IETF draft `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` headers on every response that passes through the limiter, allowed or throttled. Set to `false` to turn them off. |
+
+`RateLimit-Limit` is `maxRequests`, `RateLimit-Remaining` is the number of
+requests left in the current window (`0` once throttled) and `RateLimit-Reset`
+is the number of seconds until the window resets.
 
 When the limit is exceeded the middleware responds with **429** and a JSON body:
 
@@ -226,8 +380,29 @@ value.
 | `networkPassphrase` | `string` | `Networks.TESTNET` | Stellar network passphrase. |
 | `expectedMemo` | `string` | `undefined` | Optional memo that must match the challenge memo. |
 | `maxTokenLength` | `number` | `8192` | Maximum accepted length (in characters) of the bearer token, rejected with `401` (`"bearer token too large"`) before XDR parsing is attempted. Guards against unauthenticated callers forcing expensive XDR-parsing work with oversized input. |
+| `getToken` | `(req) => string \| undefined` | Bearer header parsing | Custom token extractor (e.g. cookie or query parameter). Return `undefined` when no token is present and the request is rejected with `401`. See the CSRF note below. |
 | `revocationStore` | `RevocationStore` | `undefined` | Optional store consulted after challenge verification to reject revoked addresses before `timeoutSeconds` expires. |
 | `logger` | `Logger` | `noopLogger` | Injectable logger (`debug`, `info`, `warn`, `error`) for auth and revocation observability. |
+
+#### Custom token extraction and CSRF
+
+Browser apps often keep the session token in an HttpOnly cookie instead of an
+`Authorization` header. Pass `getToken` to read it from there:
+
+```ts
+createSep10Middleware({
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'auth.example.com',
+  getToken: (req) => req.cookies?.sep10_token,
+});
+```
+
+Browsers attach cookies to cross-site requests automatically, so cookie-based
+extraction exposes state-changing endpoints to CSRF. Mitigate it with
+`SameSite=Strict` (or `Lax`) cookies and a CSRF token or `Origin` header check.
+Avoid query-parameter tokens where possible: they leak into logs and referrers.
+The default behaviour (Bearer header) is unchanged.
 
 ### Session revocation (`revocationStore`)
 

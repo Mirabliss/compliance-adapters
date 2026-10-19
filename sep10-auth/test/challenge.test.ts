@@ -1,4 +1,4 @@
-import { Keypair, Networks, Transaction } from '@stellar/stellar-sdk';
+import { Account, Keypair, MuxedAccount, Networks, Transaction } from '@stellar/stellar-sdk';
 import {
   generateChallenge,
   InvalidClientAddressError,

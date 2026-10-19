@@ -1,4 +1,5 @@
 import express from 'express';
+import { randomBytes } from 'crypto';
 import { Keypair, Networks } from '@stellar/stellar-sdk';
 import {
   generateChallenge,
@@ -24,6 +25,8 @@ export interface ExampleAppOptions {
   homeDomains?: string[];
   webAuthDomain?: string;
   networkPassphrase?: string;
+  /** HMAC secret for the session JWT returned by `POST /auth`. Defaults to a random demo secret. */
+  jwtSecret?: string;
 }
 
 export interface ExampleApp {
@@ -88,7 +91,7 @@ export function createApp(options: ExampleAppOptions = {}): ExampleApp {
     }
   });
 
-  // Step 2: client signs the challenge with its own wallet and sends the signed
+  // Step 2: the client signs the challenge with its own wallet and sends the signed
   // XDR back as a bearer token on any protected route.
   app.get(
     '/protected',
