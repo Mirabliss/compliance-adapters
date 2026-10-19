@@ -85,6 +85,31 @@ const challenge = generateChallenge(clientAddress, serverKeypair, {
 });
 ```
 
+### `resolveHomeDomain(requested, configured)`
+
+Resolves the SEP-10 `home_domain` request parameter against your configured
+home domains. A missing or empty value falls back to the first configured
+domain; a value that is not configured throws `UnknownHomeDomainError`, which
+a router should turn into a `400` response.
+
+```ts
+import { resolveHomeDomain, UnknownHomeDomainError } from 'sep10-auth';
+
+try {
+  const homeDomain = resolveHomeDomain(req.query.home_domain as string | undefined, [
+    'example.com',
+    'other.example.org',
+  ]);
+  // pass `homeDomain` to generateChallenge
+} catch (error) {
+  if (error instanceof UnknownHomeDomainError) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+  throw error;
+}
+```
+
 ### `verifyChallenge(signedTransactionXDR, options)`
 
 Verifies a client-signed challenge transaction and returns the authenticated
@@ -405,6 +430,14 @@ return its value directly or as a `Promise`.
 | `revoke(address, until?)` | Revokes `address`. Omit `until` to keep it revoked until `unrevoke`. Pass a `Date` to expire the revocation at that time. |
 | `unrevoke(address)` | Lifts a revocation previously set with `revoke`. |
 | `list?()` | Optional. Returns the addresses that are currently revoked. |
+| `revokeToken?(jti, expiresAt)` | Optional. Revokes one token (identified by its `jti`) without affecting the address's other tokens. The entry expires and is pruned at `expiresAt`. |
+| `isTokenRevoked?(jti)` | Optional. Whether the token identified by `jti` is currently revoked. |
+
+The `jti` of a verified token is the hex-encoded hash of its challenge
+transaction. It is available as `result.jti` from `verifyChallenge` and as
+`req.stellarTokenId` inside the middleware. When the store implements
+`isTokenRevoked`, the middleware checks it after the per-address check and
+rejects a revoked token with **401** and `{ "error": "unauthorized", "reason": "token revoked" }`.
 
 `InMemoryRevocationStore` is the included reference implementation. It holds
 revocations in a process-local `Map`, so they do not survive a process
@@ -431,6 +464,9 @@ revocationStore.revoke(someAddress);
 // Or revoke until a specific time, then lift it early if needed:
 revocationStore.revoke(someAddress, new Date(Date.now() + 15 * 60_000));
 revocationStore.unrevoke(someAddress);
+
+// Sign out a single device: revoke only this token, until it would expire anyway.
+revocationStore.revokeToken(req.stellarTokenId!, tokenExpiresAt);
 ```
 
 For a store that survives restarts, implement `RevocationStore` against

@@ -13,6 +13,7 @@
 
 import * as fs from 'fs';
 import { SanctionsProvider } from './SanctionsProvider';
+import { normalizeStellarAddress } from '@compliance-adapters/shared';
 
 const MOCK_SOURCE = 'mock-watchlist-v1';
 
@@ -117,16 +118,20 @@ export class MockSanctionsProvider implements SanctionsProvider {
   private static normalizeAddresses(
     data: Record<string, string> | string[],
   ): Record<string, string> {
-    // If it's already an object with string values, use as-is
+    // An object keyed by address: normalize each key
     if (typeof data === 'object' && !Array.isArray(data)) {
-      return data as Record<string, string>;
+      const result: Record<string, string> = {};
+      for (const [address, source] of Object.entries(data as Record<string, string>)) {
+        result[normalizeStellarAddress(address)] = source;
+      }
+      return result;
     }
 
     // If it's an array, convert to object with MOCK_SOURCE as value
     if (Array.isArray(data)) {
       const result: Record<string, string> = {};
       for (const address of data) {
-        result[address] = MOCK_SOURCE;
+        result[normalizeStellarAddress(address)] = MOCK_SOURCE;
       }
       return result;
     }
@@ -135,7 +140,7 @@ export class MockSanctionsProvider implements SanctionsProvider {
   }
 
   async checkAddress(address: string): Promise<{ flagged: boolean; source: string }> {
-    const source = this.flaggedAddresses[address];
+    const source = this.flaggedAddresses[normalizeStellarAddress(address)];
     if (source) {
       return { flagged: true, source };
     }

@@ -46,6 +46,35 @@ describe('SEP-10 express-app example', () => {
       expect(res.status).toBe(400);
     });
 
+    it('returns 400 when home_domain is not one of the configured domains', async () => {
+      const { app } = makeApp();
+
+      const res = await request(app)
+        .get('/challenge')
+        .query({ address: Keypair.random().publicKey(), home_domain: 'evil.example.net' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/home_domain/);
+    });
+
+    it('accepts a configured home_domain and falls back to the first one when omitted', async () => {
+      const serverKeypair = Keypair.random();
+      const { app } = createApp({
+        serverKeypair,
+        homeDomains: [HOME_DOMAIN, 'other.example.org'],
+        networkPassphrase: NETWORK_PASSPHRASE,
+      });
+      const address = Keypair.random().publicKey();
+
+      const explicit = await request(app)
+        .get('/challenge')
+        .query({ address, home_domain: 'other.example.org' });
+      const fallback = await request(app).get('/challenge').query({ address });
+
+      expect(explicit.status).toBe(200);
+      expect(fallback.status).toBe(200);
+    });
+
     it('returns a challenge transaction for a valid client address', async () => {
       const { app } = makeApp();
       const client = Keypair.random();

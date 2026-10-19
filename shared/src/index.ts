@@ -18,3 +18,14 @@ export { createSemaphore } from './semaphore';
 export function isValidStellarAddress(address: string): boolean {
   return StrKey.isValidEd25519PublicKey(address);
 }
+
+/**
+ * Canonical form of a Stellar address: surrounding whitespace removed and
+ * uppercased. Addresses arriving from CSV files, JSON input or REST providers
+ * may be padded or lowercase; normalize them at every ingestion boundary so the
+ * same account is never checked, cached or written twice under two spellings.
+ * Does not validate — pair with {@link isValidStellarAddress}.
+ */
+export function normalizeStellarAddress(address: string): string {
+  return address.trim().toUpperCase();
+}

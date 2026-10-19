@@ -379,6 +379,95 @@ describe('createSep10Middleware', () => {
       expect(next).toHaveBeenCalledWith(storeError);
       expect(res.status).not.toHaveBeenCalled();
     });
+
+    describe('per-token revocation', () => {
+      const jti = 'token-jti-1';
+
+      beforeEach(() => {
+        jest.spyOn(verifyModule, 'verifyChallenge').mockReturnValue({
+          valid: true,
+          address: clientAddress,
+          jti,
+        });
+      });
+
+      it('returns 401 "token revoked" when isTokenRevoked returns true', async () => {
+        const mockStore: RevocationStore = {
+          isRevoked: jest.fn().mockResolvedValue(false),
+          revoke: jest.fn(),
+          unrevoke: jest.fn(),
+          isTokenRevoked: jest.fn().mockResolvedValue(true),
+        };
+
+        const middleware = createSep10Middleware({ ...options, revocationStore: mockStore });
+        const req = makeReq('Bearer some-xdr');
+        const res = makeRes();
+        const next = jest.fn() as unknown as NextFunction;
+
+        await middleware(req, res, next);
+
+        expect(mockStore.isTokenRevoked).toHaveBeenCalledWith(jti);
+        expect(res.status).toHaveBeenCalledWith(401);
+        expect(res.json).toHaveBeenCalledWith({ error: 'unauthorized', reason: 'token revoked' });
+        expect(next).not.toHaveBeenCalled();
+      });
+
+      it('sets req.stellarTokenId and calls next() when neither address nor token is revoked', async () => {
+        const mockStore: RevocationStore = {
+          isRevoked: jest.fn().mockResolvedValue(false),
+          revoke: jest.fn(),
+          unrevoke: jest.fn(),
+          isTokenRevoked: jest.fn().mockResolvedValue(false),
+        };
+
+        const middleware = createSep10Middleware({ ...options, revocationStore: mockStore });
+        const req = makeReq('Bearer some-xdr');
+        const res = makeRes();
+        const next = jest.fn() as unknown as NextFunction;
+
+        await middleware(req, res, next);
+
+        expect(req.stellarTokenId).toBe(jti);
+        expect(next).toHaveBeenCalledTimes(1);
+      });
+
+      it('still rejects a revoked address without consulting the token check', async () => {
+        const mockStore: RevocationStore = {
+          isRevoked: jest.fn().mockResolvedValue(true),
+          revoke: jest.fn(),
+          unrevoke: jest.fn(),
+          isTokenRevoked: jest.fn().mockResolvedValue(false),
+        };
+
+        const middleware = createSep10Middleware({ ...options, revocationStore: mockStore });
+        const res = makeRes();
+        const next = jest.fn() as unknown as NextFunction;
+
+        await middleware(makeReq('Bearer some-xdr'), res, next);
+
+        expect(res.json).toHaveBeenCalledWith({ error: 'unauthorized', reason: 'address revoked' });
+        expect(mockStore.isTokenRevoked).not.toHaveBeenCalled();
+      });
+
+      it('calls next(error) when isTokenRevoked rejects', async () => {
+        const storeError = new Error('store down');
+        const mockStore: RevocationStore = {
+          isRevoked: jest.fn().mockResolvedValue(false),
+          revoke: jest.fn(),
+          unrevoke: jest.fn(),
+          isTokenRevoked: jest.fn().mockRejectedValue(storeError),
+        };
+
+        const middleware = createSep10Middleware({ ...options, revocationStore: mockStore });
+        const res = makeRes();
+        const next = jest.fn() as unknown as NextFunction;
+
+        await middleware(makeReq('Bearer some-xdr'), res, next);
+
+        expect(next).toHaveBeenCalledWith(storeError);
+        expect(res.status).not.toHaveBeenCalled();
+      });
+    });
   });
 });
 

@@ -12,7 +12,7 @@ import {
   nativeToScVal,
   rpc,
 } from '@stellar/stellar-sdk';
-import { isValidStellarAddress } from '@compliance-adapters/shared';
+import { isValidStellarAddress, normalizeStellarAddress } from '@compliance-adapters/shared';
 import { type Logger, noopLogger, consoleLogger } from '@compliance-adapters/logger';
 export type { Logger } from '@compliance-adapters/logger';
 import { SanctionsProvider } from './SanctionsProvider';
@@ -155,11 +155,19 @@ export class ProviderResultCache {
 }
 
 export interface AuditLogEntry {
-  /** The address added to the denylist. */
+  /** The address added to (or, when `action` is `'remove'`, removed from) the denylist. */
   address: string;
+  /**
+   * Set to `'remove'` for a delisting recorded by reconcile mode. Absent for
+   * additions, which keeps existing audit consumers unchanged.
+   */
+  action?: 'remove';
   /** Timestamp when the write occurred (ISO 8601 string). */
   timestamp: string;
-  /** The source watchlist that flagged the address. */
+  /**
+   * The source watchlist that flagged the address. For a removal, the provider
+   * source that reported the address as cleared.
+   */
   source: string;
   /** The transaction hash resulting from the write. */
   txHash: string;
@@ -169,6 +177,17 @@ export type AuditLogger = (entry: AuditLogEntry) => void | Promise<void>;
 
 export interface DenylistWriter {
   addToDenylist(address: string): Promise<{ hash: string }>;
+  /**
+   * Removes an address from the on-chain denylist (`remove_from_denylist`).
+   * Optional; a live reconcile run ({@link SyncOptions.reconcile}) requires
+   * this or {@link DenylistWriter.removeFromDenylistWithSource}.
+   */
+  removeFromDenylist?(address: string): Promise<{ hash: string }>;
+  /** Like {@link DenylistWriter.removeFromDenylist}, also recording the clearing provider `source` for audit purposes. */
+  removeFromDenylistWithSource?(
+    address: string,
+    source: string,
+  ): Promise<{ hash: string; auditLog?: AuditLogEntry }>;
 }
 
 export interface SyncOptions {
@@ -211,6 +230,16 @@ export interface SyncOptions {
    * but they are skipped during the actual write phase.
    */
   currentDenylist?: string[];
+  /**
+   * Opt-in delisting. When true, every address in {@link SyncOptions.currentDenylist}
+   * (the on-chain denylist or a last snapshot) is re-checked with the provider,
+   * and those the provider no longer flags are removed from the denylist via the
+   * writer's `removeFromDenylist`. Addresses whose check fails are never removed.
+   * With `dryRun` the planned removals are reported in
+   * {@link SyncResult.plannedRemovals} and nothing is removed. Each removal is
+   * audit-logged with the provider source. Defaults to false: sync only adds.
+   */
+  reconcile?: boolean;
   /**
    * Optional metrics registry.  Pass a `MetricsRegistry` instance to record
    * per-phase counters and latency histograms for `address_check` and
@@ -291,6 +320,19 @@ export interface SyncResult {
   skipped: string[];
   /** Whether this was a dry-run (read-only) operation. */
   dryRun: boolean;
+  /**
+   * Reconcile mode only: denylist addresses the provider has cleared and that
+   * were successfully removed (empty if dryRun is true).
+   */
+  removed?: string[];
+  /**
+   * Reconcile mode only: denylist addresses the provider has cleared, i.e. the
+   * removals that are planned (dry-run) or attempted (live), with the provider
+   * source that cleared each.
+   */
+  plannedRemovals?: { address: string; source: string }[];
+  /** Reconcile mode only: cleared addresses whose removal transaction failed. */
+  failedRemovals?: FailedAddress[];
 }
 
 interface FlaggedAddressWithSource {
@@ -344,6 +386,7 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
     tracer = new NoopTracer(),
     checkpoint,
     resume = false,
+    reconcile = false,
   } = options;
 
   const legacyLogger = logger as Logger & { log?: (...args: unknown[]) => void };
@@ -375,18 +418,49 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
 
   safeLogger.info('sanctions-oracle: starting sync', { total: addresses.length, dryRun });
 
-  const uniqueAddresses = Array.from(new Set(addresses));
+  if (
+    reconcile &&
+    !dryRun &&
+    !writer.removeFromDenylist &&
+    !writer.removeFromDenylistWithSource
+  ) {
+    throw new Error(
+      'sanctions-oracle: reconcile requires a writer that implements removeFromDenylist',
+    );
+  }
 
   // Reject malformed input up front so a typo / truncated paste / non-Stellar
   // identifier is reported distinctly instead of being checked and quietly
-  // landing in neither `flagged` nor `failed`.
+  // landing in neither `flagged` nor `failed`. Valid input is normalized
+  // (trimmed, uppercased) first so one account maps to one canonical address
+  // for the provider lookup, the cache key and the denylist write.
+  const normalizedInput = addresses.map(normalizeStellarAddress);
   const invalid: string[] = [];
   const validAddresses: string[] = [];
-  for (const address of uniqueAddresses) {
+  const seenValid = new Set<string>();
+  const seenInvalid = new Set<string>();
+  addresses.forEach((raw, i) => {
+    const address = normalizedInput[i];
     if (isValidStellarAddress(address)) {
-      validAddresses.push(address);
-    } else {
-      invalid.push(address);
+      if (!seenValid.has(address)) {
+        seenValid.add(address);
+        validAddresses.push(address);
+      }
+    } else if (!seenInvalid.has(raw)) {
+      seenInvalid.add(raw);
+      invalid.push(raw);
+    }
+  });
+  const uniqueCount = validAddresses.length + invalid.length;
+
+  const currentDenylistSet = new Set(currentDenylist.map(normalizeStellarAddress));
+  if (reconcile) {
+    // Denylist entries must be re-checked to learn whether they were cleared.
+    for (const entry of currentDenylistSet) {
+      if (isValidStellarAddress(entry) && !seenValid.has(entry)) {
+        seenValid.add(entry);
+        validAddresses.push(entry);
+      }
     }
   }
   if (invalid.length > 0) {
@@ -413,10 +487,10 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
     }
   }
 
-  const currentDenylistSet = new Set(currentDenylist);
   const inflightChecks = new Map<string, Promise<{ flagged: boolean; source: string }>>();
   const flagged: string[] = [];
   const flaggedWithSource: FlaggedAddressWithSource[] = [];
+  const clearedWithSource: FlaggedAddressWithSource[] = [];
   const failed: string[] = [];
   const failedWithReasons: FailedAddress[] = [];
   let checked = 0;
@@ -464,7 +538,7 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
       const start = Date.now();
       const span = tracer.startSpan('address_check');
       // address is omitted from spans by default (privacy / cardinality).
-      span.setAttribute('address_check.index', addresses.indexOf(address));
+      span.setAttribute('address_check.index', normalizedInput.indexOf(address));
       try {
         const result = await getAddressResult(address);
         const durationMs = Date.now() - start;
@@ -475,6 +549,11 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
         if (result.flagged) {
           flagged.push(address);
           flaggedWithSource.push({ address, source: result.source });
+        } else if (reconcile && currentDenylistSet.has(address)) {
+          // Cleared by the provider but still on the denylist: it is only
+          // checkpointed once the removal succeeds, so an interrupted removal
+          // is retried on resume.
+          clearedWithSource.push({ address, source: result.source });
         } else {
           // Clean address: nothing left to do for it, so it can be checkpointed
           // now. Flagged addresses are checkpointed only after a successful
@@ -494,7 +573,7 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
       } finally {
         checked += 1;
         if (checked % progressInterval === 0) {
-          progressLogger(`Progress: ${checked}/${uniqueAddresses.length} addresses checked`);
+          progressLogger(`Progress: ${checked}/${uniqueCount} addresses checked`);
         }
       }
     },
@@ -515,7 +594,6 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
       safeLogger.info('sanctions-oracle: [dry-run] would call add_to_denylist', { address });
     }
   } else {
-    const currentDenylistSet = new Set(currentDenylist);
     for (const { address, source } of flaggedWithSource) {
       if (currentDenylistSet.has(address)) {
         continue;
@@ -562,6 +640,46 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
     }
   }
 
+  const removed: string[] = [];
+  const failedRemovals: FailedAddress[] = [];
+  if (reconcile) {
+    for (const { address, source } of clearedWithSource) {
+      if (dryRun) {
+        safeLogger.info('sanctions-oracle: [dry-run] would call remove_from_denylist', {
+          address,
+          source,
+        });
+        continue;
+      }
+      const span = tracer.startSpan('denylist_remove');
+      try {
+        let result: { hash: string; auditLog?: AuditLogEntry };
+        if (writer.removeFromDenylistWithSource) {
+          result = await writer.removeFromDenylistWithSource(address, source);
+        } else {
+          result = await writer.removeFromDenylist!(address);
+        }
+        span.setAttribute('denylist_remove.tx_hash', result.hash);
+        span.end('ok');
+        removed.push(address);
+        await checkpoint?.markComplete(address);
+        // Audit trail: every delisting is recorded with the clearing provider source.
+        safeLogger.info('sanctions-oracle: address removed from denylist', {
+          action: 'remove',
+          address,
+          source,
+          hash: result.hash,
+        });
+      } catch (err) {
+        span.end('error', err instanceof Error ? err : new Error(String(err)));
+        failedRemovals.push({
+          address,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
   return {
     checked: pendingAddresses.length,
     flagged,
@@ -571,6 +689,13 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
     invalid,
     skipped,
     dryRun,
+    ...(reconcile
+      ? {
+          removed,
+          plannedRemovals: clearedWithSource.map(({ address, source }) => ({ address, source })),
+          failedRemovals,
+        }
+      : {}),
   };
 }
 
@@ -608,6 +733,11 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
     address: string,
     source: string,
   ) => Promise<{ hash: string; auditLog?: AuditLogEntry }>;
+  removeFromDenylist: (address: string) => Promise<{ hash: string }>;
+  removeFromDenylistWithSource: (
+    address: string,
+    source: string,
+  ) => Promise<{ hash: string; auditLog?: AuditLogEntry }>;
 } {
   const {
     rpcUrl,
@@ -624,14 +754,17 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
 
   // Shared by both public methods below so the retry/backoff behavior around
   // sendTransaction can't drift between the audited and non-audited paths.
-  async function buildPrepareSignAndSend(address: string): Promise<{ hash: string }> {
+  async function buildPrepareSignAndSend(
+    address: string,
+    method: 'add_to_denylist' | 'remove_from_denylist' = 'add_to_denylist',
+  ): Promise<{ hash: string }> {
     const account = await server.getAccount(sourceKeypair.publicKey());
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase,
     })
-      .addOperation(contract.call('add_to_denylist', nativeToScVal(address, { type: 'address' })))
+      .addOperation(contract.call(method, nativeToScVal(address, { type: 'address' })))
       .setTimeout(30)
       .build();
 
@@ -663,6 +796,26 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
     throw new Error(`Failed to send transaction after ${maxRetries} attempts: ${err}`);
   }
 
+  // Shared by the add and remove audited paths so audit-failure handling
+  // can't drift between them.
+  async function writeAuditEntry(auditEntry: AuditLogEntry): Promise<void> {
+    const { address, txHash: hash } = auditEntry;
+    if (auditLogger) {
+      try {
+        await auditLogger(auditEntry);
+      } catch (error) {
+        // The on-chain write above already succeeded — an audit-logging
+        // failure must not fail this address's write or propagate up
+        // through syncSanctionsToDenylist's write loop.
+        logger.error?.('sanctions-oracle: audit logger failed after successful denylist write', {
+          address,
+          txHash: hash,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   return {
     async addToDenylist(address: string): Promise<{ hash: string }> {
       return buildPrepareSignAndSend(address);
@@ -679,21 +832,27 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
         source,
         txHash: hash,
       };
+      await writeAuditEntry(auditEntry);
 
-      if (auditLogger) {
-        try {
-          await auditLogger(auditEntry);
-        } catch (error) {
-          // The on-chain write above already succeeded — an audit-logging
-          // failure must not fail this address's write or propagate up
-          // through syncSanctionsToDenylist's write loop.
-          logger.error?.('sanctions-oracle: audit logger failed after successful denylist write', {
-            address,
-            txHash: hash,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+      return { hash, auditLog: auditEntry };
+    },
+    async removeFromDenylist(address: string): Promise<{ hash: string }> {
+      return buildPrepareSignAndSend(address, 'remove_from_denylist');
+    },
+    async removeFromDenylistWithSource(
+      address: string,
+      source: string,
+    ): Promise<{ hash: string; auditLog?: AuditLogEntry }> {
+      const { hash } = await buildPrepareSignAndSend(address, 'remove_from_denylist');
+
+      const auditEntry: AuditLogEntry = {
+        address,
+        action: 'remove',
+        timestamp: new Date().toISOString(),
+        source,
+        txHash: hash,
+      };
+      await writeAuditEntry(auditEntry);
 
       return { hash, auditLog: auditEntry };
     },
@@ -714,6 +873,10 @@ export interface CliArgs {
   providerModulePath?: string;
   /** Wrap the selected provider with RateLimitedSanctionsProvider's backoff/concurrency protection. */
   rateLimit?: boolean;
+  /** Opt in to delisting: remove denylist addresses the provider has cleared. Requires `denylistSnapshotPath`. */
+  reconcile?: boolean;
+  /** Path to a JSON array of the addresses currently on the denylist (the last snapshot). */
+  denylistSnapshotPath?: string;
 }
 
 /**
@@ -771,6 +934,13 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--rate-limit':
         args.rateLimit = true;
         break;
+      case '--reconcile':
+        args.reconcile = true;
+        break;
+      case '--denylist-snapshot':
+        args.denylistSnapshotPath = readValue(arg, i);
+        i += 1;
+        break;
       case '--help':
       case '-h':
         args.help = true;
@@ -804,6 +974,11 @@ OPTIONS:
   --provider-module <path>    Dynamically import a module whose default export is a
                                SanctionsProvider to use instead of the mock/CSV provider
   --rate-limit                Wrap the selected provider with RateLimitedSanctionsProvider
+  --reconcile                 Opt in to delisting: remove addresses from the denylist once the
+                               provider no longer flags them (requires --denylist-snapshot);
+                               combine with --dry-run to preview the planned removals
+  --denylist-snapshot <path>  Path to JSON file containing an array of the addresses currently
+                               on the denylist
   --dry-run                   Preview output without writing to the contract
   --help, -h                  Show this help message
 
@@ -855,12 +1030,12 @@ export async function runCli(argv?: string[]): Promise<void> {
     if (emptyStrings.length > 0) {
       throw new Error(`Addresses file contains ${emptyStrings.length} empty string entries`);
     }
-    const uniqueAddresses = Array.from(new Set(parsed));
+    const uniqueAddresses = Array.from(new Set(parsed.map(normalizeStellarAddress)));
     const duplicateCount = parsed.length - uniqueAddresses.length;
     if (duplicateCount > 0) {
       logger.info(`sanctions-oracle: deduplicating ${duplicateCount} duplicate addresses`);
     }
-    addresses = parsed;
+    addresses = parsed.map(normalizeStellarAddress);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error(
@@ -869,6 +1044,32 @@ export async function runCli(argv?: string[]): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  if (args.reconcile && !args.denylistSnapshotPath) {
+    logger.error?.(
+      'sanctions-oracle: --reconcile requires --denylist-snapshot <path-to-json-array> listing the current denylist',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  let currentDenylist: string[] | undefined;
+  if (args.denylistSnapshotPath) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(args.denylistSnapshotPath, 'utf8'));
+      if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+        throw new Error('Denylist snapshot must be a JSON array of strings');
+      }
+      currentDenylist = parsed;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(
+        `sanctions-oracle: Failed to load denylist snapshot from ${args.denylistSnapshotPath}: ${message}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
+  }
+
   let provider: SanctionsProvider;
   if (args.providerModulePath) {
     try {
@@ -901,6 +1102,8 @@ export async function runCli(argv?: string[]): Promise<void> {
       },
       dryRun: true,
       logger,
+      currentDenylist,
+      reconcile: args.reconcile,
     });
     logger.info('sanctions-oracle: dry-run result', result);
     // CLI-only: the machine-readable result is written to stdout so it can be
@@ -928,6 +1131,10 @@ export async function runCli(argv?: string[]): Promise<void> {
     networkPassphrase: args.networkPassphrase,
     contractId: args.contractId,
     sourceKeypair: Keypair.fromSecret(secretKey),
+    // Every delisting is recorded with the clearing provider's source.
+    ...(args.reconcile
+      ? { auditLogger: (entry: AuditLogEntry) => logger.info('sanctions-oracle: audit', entry), logger }
+      : {}),
   });
 
   const result = await syncSanctionsToDenylist({
@@ -936,6 +1143,8 @@ export async function runCli(argv?: string[]): Promise<void> {
     writer,
     dryRun: false,
     logger,
+    currentDenylist,
+    reconcile: args.reconcile,
   });
   // CLI-only: machine-readable result to stdout (see dry-run branch above).
   // eslint-disable-next-line no-console

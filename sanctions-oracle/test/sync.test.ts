@@ -1073,3 +1073,15 @@ describe('runCli', () => {
     fs.unlinkSync(addressesFile);
   });
 });
+
+describe('parseArgs reconcile flags', () => {
+  it('parses --reconcile and --denylist-snapshot', () => {
+    const args = parseArgs(['--reconcile', '--denylist-snapshot', 'denylist.json']);
+    expect(args.reconcile).toBe(true);
+    expect(args.denylistSnapshotPath).toBe('denylist.json');
+  });
+
+  it('leaves reconcile off by default', () => {
+    expect(parseArgs([]).reconcile).toBeUndefined();
+  });
+});

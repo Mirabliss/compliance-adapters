@@ -14,6 +14,8 @@ declare global {
   namespace Express {
     interface Request {
       stellarAddress?: string;
+      /** Identifier (`jti`) of the verified token; use with `RevocationStore.revokeToken`. */
+      stellarTokenId?: string;
     }
   }
 }
@@ -328,21 +330,33 @@ export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestH
       }
     }
 
-    if (!result.ok) {
-      logger.warn(result.logMessage, {
-        ...result.logContext,
-        ip: req.ip,
-        path: req.path,
-      });
-      res
-        .set('WWW-Authenticate', result.wwwAuthenticate)
-        .status(401)
-        .json({ error: 'unauthorized', reason: result.reason });
-      return;
+      if (revoked) {
+        logger.warn('sep10-auth: address is revoked', { address: result.address });
+        res.status(401).json({ error: 'unauthorized', reason: 'address revoked' });
+        return;
+      }
+
+      if (result.jti !== undefined && options.revocationStore.isTokenRevoked) {
+        let tokenRevoked: boolean;
+        try {
+          tokenRevoked = await options.revocationStore.isTokenRevoked(result.jti);
+        } catch (error) {
+          logger.error('sep10-auth: revocation store lookup failed', error);
+          next(error);
+          return;
+        }
+
+        if (tokenRevoked) {
+          logger.warn('sep10-auth: token is revoked', { address: result.address, jti: result.jti });
+          res.status(401).json({ error: 'unauthorized', reason: 'token revoked' });
+          return;
+        }
+      }
     }
 
     logger.debug('sep10-auth: request authenticated', { address: result.address, path: req.path });
     req.stellarAddress = result.address;
+    req.stellarTokenId = result.jti;
     next();
   };
 }

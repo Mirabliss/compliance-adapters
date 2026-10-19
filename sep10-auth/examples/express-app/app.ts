@@ -1,7 +1,12 @@
 import express from 'express';
 import { randomBytes } from 'crypto';
 import { Keypair, Networks } from '@stellar/stellar-sdk';
-import { createSep10Router, createSep10Middleware } from '../../src';
+import {
+  generateChallenge,
+  createSep10Middleware,
+  resolveHomeDomain,
+  UnknownHomeDomainError,
+} from '../../src';
 
 export interface ExampleAppOptions {
   /**
@@ -12,6 +17,12 @@ export interface ExampleAppOptions {
    */
   serverKeypair?: Keypair;
   homeDomain?: string;
+  /**
+   * Home domains this server serves. A client selects one with the SEP-10
+   * `home_domain` query parameter; unknown values are rejected with 400 and a
+   * missing value falls back to the first entry. Defaults to `[homeDomain]`.
+   */
+  homeDomains?: string[];
   webAuthDomain?: string;
   networkPassphrase?: string;
   /** HMAC secret for the session JWT returned by `POST /auth`. Defaults to a random demo secret. */
@@ -33,24 +44,52 @@ export interface ExampleApp {
 export function createApp(options: ExampleAppOptions = {}): ExampleApp {
   const serverKeypair = options.serverKeypair ?? Keypair.random();
   const homeDomain = options.homeDomain ?? 'example.com';
-  const webAuthDomain = options.webAuthDomain ?? homeDomain;
+  const homeDomains = options.homeDomains ?? [homeDomain];
+  const webAuthDomain = options.webAuthDomain ?? homeDomains[0];
   const networkPassphrase = options.networkPassphrase ?? Networks.TESTNET;
 
   const app = express();
   app.use(express.json());
 
-  // Step 1: the router exposes the SEP-10 endpoints. GET /auth returns a
-  // challenge transaction for the client to sign; POST /auth exchanges the
-  // signed challenge for a session token.
-  app.use(
-    createSep10Router({
-      serverKeypair,
-      homeDomain,
-      webAuthDomain,
-      networkPassphrase,
-      jwtSecret: options.jwtSecret ?? randomBytes(32).toString('hex'),
-    }),
-  );
+  // Step 1: client requests a challenge transaction for its address to sign.
+  app.get('/challenge', (req, res) => {
+    const clientAddress = req.query.address;
+
+    if (typeof clientAddress !== 'string' || !clientAddress) {
+      res.status(400).json({ error: 'missing required "address" query parameter' });
+      return;
+    }
+
+    const requestedHomeDomain = req.query.home_domain;
+    let resolvedHomeDomain: string;
+    try {
+      resolvedHomeDomain = resolveHomeDomain(
+        typeof requestedHomeDomain === 'string' ? requestedHomeDomain : undefined,
+        homeDomains,
+      );
+    } catch (error) {
+      if (error instanceof UnknownHomeDomainError) {
+        res.status(400).json({ error: 'unknown "home_domain" query parameter' });
+        return;
+      }
+      throw error;
+    }
+
+    try {
+      const challenge = generateChallenge(clientAddress, serverKeypair, {
+        homeDomain: resolvedHomeDomain,
+        webAuthDomain,
+        networkPassphrase,
+      });
+
+      res.json({
+        transaction: challenge.transactionXDR,
+        network_passphrase: challenge.networkPassphrase,
+      });
+    } catch {
+      res.status(400).json({ error: 'invalid "address" query parameter' });
+    }
+  });
 
   // Step 2: the client signs the challenge with its own wallet and sends the signed
   // XDR back as a bearer token on any protected route.
@@ -59,7 +98,7 @@ export function createApp(options: ExampleAppOptions = {}): ExampleApp {
     createSep10Middleware({
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase,
-      homeDomains: homeDomain,
+      homeDomains,
       webAuthDomain,
     }),
     (req, res) => {

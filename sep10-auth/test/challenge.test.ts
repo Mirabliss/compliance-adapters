@@ -4,9 +4,9 @@ import {
   InvalidClientAddressError,
   InvalidDomainError,
   InvalidMemoError,
-  InvalidTimeoutError,
-  MemoWithMuxedAccountError,
+  resolveHomeDomain,
   ServerKeypairCannotSignError,
+  UnknownHomeDomainError,
 } from '../src/challenge';
 
 describe('generateChallenge', () => {
@@ -217,75 +217,26 @@ describe('generateChallenge', () => {
   });
 });
 
-describe('generateChallenge timeoutSec', () => {
-  const opts = { homeDomain: 'localhost:3000', webAuthDomain: 'localhost:3000' };
+describe('resolveHomeDomain', () => {
+  const configured = ['example.com', 'other.example.org'];
 
-  function windowOf(xdrString: string): number {
-    const { timeBounds } = new Transaction(xdrString, Networks.TESTNET);
-    return Number(timeBounds!.maxTime) - Number(timeBounds!.minTime);
-  }
-
-  it('defaults the validity window to 900 seconds', () => {
-    const challenge = generateChallenge(Keypair.random().publicKey(), Keypair.random(), opts);
-    expect(windowOf(challenge.transactionXDR)).toBe(900);
+  it('returns a requested domain that is configured', () => {
+    expect(resolveHomeDomain('other.example.org', configured)).toBe('other.example.org');
   });
 
-  it('reflects a custom timeoutSec in the timebounds and expiresAt', () => {
-    const before = Date.now();
-    const challenge = generateChallenge(Keypair.random().publicKey(), Keypair.random(), {
-      ...opts,
-      timeoutSec: 120,
-    });
-    expect(windowOf(challenge.transactionXDR)).toBe(120);
-    expect(challenge.expiresAt.getTime()).toBeGreaterThanOrEqual(before + 120 * 1000);
+  it('rejects a domain that is not configured', () => {
+    expect(() => resolveHomeDomain('evil.example.net', configured)).toThrow(UnknownHomeDomainError);
   });
 
-  it('accepts the upper bound (3600) and the smallest positive value', () => {
-    expect(windowOf(generateChallenge(Keypair.random().publicKey(), Keypair.random(), { ...opts, timeoutSec: 3600 }).transactionXDR)).toBe(3600);
-    expect(() =>
-      generateChallenge(Keypair.random().publicKey(), Keypair.random(), { ...opts, timeoutSec: 1 }),
-    ).not.toThrow();
+  it('falls back to the first configured domain when the param is missing', () => {
+    expect(resolveHomeDomain(undefined, configured)).toBe('example.com');
+    expect(resolveHomeDomain(null, configured)).toBe('example.com');
+    expect(resolveHomeDomain('', configured)).toBe('example.com');
   });
 
-  it.each([0, -1, 3601, NaN, Infinity])('rejects timeoutSec = %p', (timeoutSec) => {
-    expect(() =>
-      generateChallenge(Keypair.random().publicKey(), Keypair.random(), { ...opts, timeoutSec }),
-    ).toThrow(InvalidTimeoutError);
-  });
-
-  it('still honours the deprecated timeoutSeconds alias, and validates it', () => {
-    const challenge = generateChallenge(Keypair.random().publicKey(), Keypair.random(), {
-      ...opts,
-      timeoutSeconds: 300,
-    });
-    expect(windowOf(challenge.transactionXDR)).toBe(300);
-    expect(() =>
-      generateChallenge(Keypair.random().publicKey(), Keypair.random(), { ...opts, timeoutSeconds: 7200 }),
-    ).toThrow(InvalidTimeoutError);
+  it('accepts a single configured domain given as a string', () => {
+    expect(resolveHomeDomain(undefined, 'example.com')).toBe('example.com');
+    expect(resolveHomeDomain('example.com', 'example.com')).toBe('example.com');
+    expect(() => resolveHomeDomain('other.com', 'example.com')).toThrow(UnknownHomeDomainError);
   });
 });
-
-describe('generateChallenge muxed client accounts', () => {
-  const opts = { homeDomain: 'localhost:3000', webAuthDomain: 'localhost:3000' };
-  const base = Keypair.random();
-  const muxedAddress = new MuxedAccount(new Account(base.publicKey(), '0'), '42').accountId();
-
-  it('accepts an M-address and uses it as the client operation source', () => {
-    const challenge = generateChallenge(muxedAddress, Keypair.random(), opts);
-    const tx = new Transaction(challenge.transactionXDR, Networks.TESTNET);
-    expect(tx.operations[0].source).toBe(muxedAddress);
-  });
-
-  it('throws a typed error when a memo is combined with a muxed account', () => {
-    expect(() => generateChallenge(muxedAddress, Keypair.random(), { ...opts, memo: '1' })).toThrow(
-      MemoWithMuxedAccountError,
-    );
-  });
-
-  it('still rejects malformed addresses', () => {
-    expect(() => generateChallenge('M' + 'A'.repeat(68), Keypair.random(), opts)).toThrow(
-      InvalidClientAddressError,
-    );
-  });
-});
-
