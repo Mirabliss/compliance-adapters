@@ -116,9 +116,85 @@ app.get('/compliance/status', (req, res) => {
 });
 ```
 
+Every `401` response carries an RFC 6750 `WWW-Authenticate` header, e.g.
+`Bearer realm="example.com", error="invalid_token"`. The `realm` is the first
+configured home domain; `error` is `invalid_request` when the `Authorization`
+header is missing or malformed, and `invalid_token` when the token is too
+large, fails verification or belongs to a revoked address.
+
 This is a reference pattern: it re-verifies the raw challenge transaction on
 every request. A production deployment would typically verify once and issue
 a short-lived session token instead — that's out of scope for this package.
+
+### `sep10Plugin` (Fastify)
+
+A Fastify plugin, imported from `sep10-auth/fastify`, that shares its
+authentication logic with `createSep10Middleware` through
+`authenticateRequest(headers, options)` and decorates `request.stellarAddress`.
+It takes the same options as `createSep10Middleware` plus `global`. `fastify`
+and `fastify-plugin` are optional peer dependencies.
+
+```ts
+import Fastify from 'fastify';
+import { sep10Plugin } from 'sep10-auth/fastify';
+
+const app = Fastify();
+await app.register(sep10Plugin, {
+  serverAccountId: serverKeypair.publicKey(),
+  homeDomains: 'example.com',
+  webAuthDomain: 'auth.example.com',
+});
+
+app.get('/compliance/status', async (request) => ({ address: request.stellarAddress }));
+```
+
+By default every route in the scope is authenticated. Pass `global: false` to
+only decorate `fastify.sep10Authenticate` and attach it to individual routes
+with `{ preHandler: app.sep10Authenticate }`. `401` responses match the Express
+adapter, including the `WWW-Authenticate` header.
+
+### `createSep10Router(options)`
+
+An Express `Router` implementing the SEP-10 endpoints, guarded by the built-in
+`rateLimiter`:
+
+- `GET /auth?account=...&home_domain=...&client_domain=...&memo=...` responds
+  `{ "transaction": "...", "network_passphrase": "..." }`.
+- `POST /auth` with `{ "transaction": "<signed XDR>" }` (JSON or form-encoded)
+  responds `{ "token": "<jwt>" }`.
+
+Failures respond `{ "error": "<message>" }` with `400` (invalid request or
+challenge) or `429` (rate limited).
+
+```ts
+import express from 'express';
+import { createSep10Router } from 'sep10-auth';
+
+const app = express();
+app.use(
+  createSep10Router({
+    serverKeypair,
+    homeDomain: 'example.com',
+    jwtSecret: process.env.SEP10_JWT_SECRET!,
+  })
+);
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `serverKeypair` | *(required)* | Keypair that signs challenge transactions. |
+| `homeDomain` | *(required)* | Home domain(s). The first is the default when `home_domain` is omitted. |
+| `webAuthDomain` | first home domain | Web-auth domain(s) embedded in challenges. |
+| `networkPassphrase` | `Networks.TESTNET` | Stellar network passphrase. |
+| `challengeTimeoutSeconds` | `300` | Challenge lifetime. |
+| `rateLimit` | `{}` | Options for the built-in `rateLimiter`, or `false` to disable it. |
+| `jwtSecret` | — | HMAC secret for the built-in HS256 JWT issuer (`issueJwt`). Required unless `issueToken` is set. |
+| `jwtExpiresInSeconds` | `86400` | Lifetime of issued tokens. |
+| `jwtIssuer` | `https://<first home domain>` | The JWT `iss` claim. |
+| `issueToken` | — | Replaces the built-in JWT issuer: `(account, { clientDomain, transaction }) => string \| Promise<string>`. |
+| `resolveClientSigningKey` | — | Resolves a `client_domain`'s `SIGNING_KEY`. Without it, requests with `client_domain` get `400`. |
+| `maxTransactionLength` | `8192` | Maximum accepted length of the posted transaction. |
+| `logger` | `noopLogger` | Injectable logger. |
 
 ### `rateLimiter(options?)`
 
@@ -173,6 +249,11 @@ app.use(
 | `maxRequests` | `100` | Maximum requests allowed inside the window for one key. Must be a positive integer. |
 | `keyGenerator` | `req.ip`, then `req.socket.remoteAddress`, then `"unknown"` | Returns the counter key for a request. |
 | `store` | `InMemoryRateLimitStore` | A pluggable backend implementing `RateLimitStore` (`consume(key, now, windowMs, maxRequests)`) for local or distributed counters (e.g. Redis). |
+| `standardHeaders` | `true` | Send the IETF draft `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` headers on every response that passes through the limiter, allowed or throttled. Set to `false` to turn them off. |
+
+`RateLimit-Limit` is `maxRequests`, `RateLimit-Remaining` is the number of
+requests left in the current window (`0` once throttled) and `RateLimit-Reset`
+is the number of seconds until the window resets.
 
 When the limit is exceeded the middleware responds with **429** and a JSON body:
 
