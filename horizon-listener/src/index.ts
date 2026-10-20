@@ -18,8 +18,11 @@ export {
 export {
   InMemoryDeadLetterQueue,
   FileDeadLetterQueue,
+  replayDeadLetterQueue,
   type DeadLetterEvent,
   type DeadLetterQueue,
+  type ReplayDeadLetterQueueOptions,
+  type ReplayDeadLetterQueueResult,
 } from './deadLetterQueue';
 export { computeBackoffDelayMs, type BackoffOptions } from '@compliance-adapters/backoff';
 export { HttpWebhookSender, WebhookHttpError, type WebhookSender, type HttpWebhookSenderOptions } from './webhook';
