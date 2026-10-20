@@ -3,6 +3,13 @@
  * SPDX-License-Identifier: MIT
  */
 
+/**
+ * horizon-listener — NOTE: despite the name, this package consumes Soroban RPC
+ * `getEvents`, not the Horizon REST/SSE API. Point it at a Soroban RPC endpoint.
+ * A rename (e.g. `@compliance-adapters/event-listener`) with a deprecation
+ * alias is tracked as a follow-up discussion.
+ */
+
 export { HorizonListener, type HorizonListenerOptions, type Logger } from './listener';
 export {
   RpcEventSource,
