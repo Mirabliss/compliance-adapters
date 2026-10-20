@@ -119,6 +119,35 @@ instead of being re-checked and re-written — so a large sync that crashed
 after writing 500 of 2000 addresses picks up from 501 rather than paying
 the fees to re-write the first 500.
 
+### Persisting checkpoints to a file
+
+`FileCheckpointStore(path, logger?)` persists completed addresses as a JSON
+array. Writes are atomic (written to `<path>.tmp`, then renamed), and a
+corrupt or truncated file is moved aside to `<path>.corrupt-<timestamp>` with a
+warning instead of crashing the sync. From the CLI, pass `--checkpoint <path>`
+to enable it for a live sync (resume is automatic).
+
+### Durable audit log (JSONL)
+
+`createJsonlAuditLogger(path, { fsync? })` returns an `AuditLogger` that
+appends one JSON line (with its ISO 8601 `timestamp`) per denylist write to an
+append-only file. Writes are serialized so concurrent events never interleave;
+set `fsync: true` to flush each line to disk. From the CLI, use
+`--audit-log <path>`.
+
+### Machine-readable CLI output (`--json`)
+
+With `--json`, stdout contains only the final `SyncResult` as JSON and all
+progress logs go to stderr, so CI and cron wrappers can pipe it straight into
+`jq`. Exit codes are unchanged.
+
+### Example: Chainalysis provider
+
+[`examples/providers/chainalysis.ts`](../examples/providers/chainalysis.ts)
+adapts the free Chainalysis sanctions screening API to `SanctionsProvider`
+(API key via `CHAINALYSIS_API_KEY`, response mapping, and
+`RateLimitedSanctionsProvider` wrapping).
+
 ## The `SanctionsProvider` interface
 
 ```ts
