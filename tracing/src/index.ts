@@ -313,10 +313,31 @@ export class NoopTracer implements Tracer {
   }
 
   injectContext(context: TracingContext): string {
-    return `00-${context.traceId}-${context.spanId}-01`;
+    return `00-${context.traceId}-${context.spanId}-${context.sampled === false ? '00' : '01'}`;
   }
 
   async shutdown(): Promise<void> {}
+}
+
+export function extractTraceContext(
+  headers: Record<string, string | string[] | undefined> | Headers,
+  tracer?: Tracer,
+): TracingContext | undefined {
+  let raw: string | undefined;
+  if (typeof (headers as Headers).get === 'function') {
+    raw = (headers as Headers).get('traceparent') ?? undefined;
+  } else {
+    const rec = headers as Record<string, string | string[] | undefined>;
+    for (const key of Object.keys(rec ?? {})) {
+      if (key.toLowerCase() === 'traceparent') {
+        const v = rec[key];
+        raw = Array.isArray(v) ? v[0] : v;
+        break;
+      }
+    }
+  }
+  if (!raw) return undefined;
+  return (tracer ?? new DefaultTracer()).extractContext(raw);
 }
 
 export type AnyTracer = DefaultTracer | NoopTracer;
