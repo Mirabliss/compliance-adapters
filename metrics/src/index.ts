@@ -53,10 +53,35 @@ export interface Gauge<Phase extends string> {
   get(phase: Phase): number;
 }
 
+/** Default cap for distinct label series per metric before overflow folding. */
+export const DEFAULT_MAX_SERIES = 1000;
+
+/** Label value used for the folded overflow series. */
+export const OVERFLOW_LABEL = '__overflow__';
+
+/** Warns at most once per registry when the series cap is first exceeded. */
+function makeWarnOnce(onWarn?: () => void): () => void {
+  let warned = false;
+  return () => {
+    if (warned) return;
+    warned = true;
+    if (onWarn) onWarn();
+    else console.warn('metrics: maxSeries exceeded, folding new label sets into __overflow__');
+  };
+}
+
 // ── Counter implementation ────────────────────────────────────────────────────
 
 class DefaultCounter<Phase extends string> implements Counter<Phase> {
   private readonly data = new Map<string, number>();
+  private overflowTotal = 0;
+  private readonly maxSeries: number;
+  private readonly warnOnce: () => void;
+
+  constructor(maxSeries: number = DEFAULT_MAX_SERIES, warnOnce: () => void = () => undefined) {
+    this.maxSeries = maxSeries;
+    this.warnOnce = warnOnce;
+  }
 
   private key(phase: Phase, outcome: Outcome): string {
     return `${phase}:${outcome}`;
@@ -64,11 +89,26 @@ class DefaultCounter<Phase extends string> implements Counter<Phase> {
 
   inc(phase: Phase, outcome: Outcome): void {
     const k = this.key(phase, outcome);
-    this.data.set(k, (this.data.get(k) ?? 0) + 1);
+    if (this.data.has(k)) {
+      this.data.set(k, this.data.get(k)! + 1);
+      return;
+    }
+    if (this.data.size >= this.maxSeries) {
+      this.overflowTotal += 1;
+      this.warnOnce();
+      return;
+    }
+    this.data.set(k, 1);
   }
 
   get(phase: Phase, outcome: Outcome): number {
+    if ((phase as string) === OVERFLOW_LABEL) return this.overflowTotal;
     return this.data.get(this.key(phase, outcome)) ?? 0;
+  }
+
+  /** Total increments folded into the overflow series. */
+  getOverflowTotal(): number {
+    return this.overflowTotal;
   }
 }
 
@@ -84,16 +124,34 @@ class DefaultHistogram<Phase extends string> implements Histogram<Phase> {
   private readonly buckets: number[];
   // phase → raw observation list
   private readonly observations = new Map<Phase, number[]>();
+  private readonly maxSeries: number;
+  private readonly warnOnce: () => void;
 
-  constructor(buckets: number[] = DEFAULT_HISTOGRAM_BUCKETS) {
+  constructor(
+    buckets: number[] = DEFAULT_HISTOGRAM_BUCKETS,
+    maxSeries: number = DEFAULT_MAX_SERIES,
+    warnOnce: () => void = () => undefined,
+  ) {
     this.buckets = [...buckets].sort((a, b) => a - b);
+    this.maxSeries = maxSeries;
+    this.warnOnce = warnOnce;
   }
 
   observe(phase: Phase, durationMs: number): void {
-    if (!this.observations.has(phase)) {
-      this.observations.set(phase, []);
+    let target = phase;
+    if (!this.observations.has(target) && (target as string) !== OVERFLOW_LABEL) {
+      const realSize = this.observations.has(OVERFLOW_LABEL as Phase)
+        ? this.observations.size - 1
+        : this.observations.size;
+      if (realSize >= this.maxSeries) {
+        target = OVERFLOW_LABEL as Phase;
+        this.warnOnce();
+      }
     }
-    this.observations.get(phase)!.push(durationMs);
+    if (!this.observations.has(target)) {
+      this.observations.set(target, []);
+    }
+    this.observations.get(target)!.push(durationMs);
   }
 
   snapshot(phase: Phase): { count: number; sum: number; buckets: Map<number | '+Inf', number> } {
@@ -117,17 +175,38 @@ class DefaultHistogram<Phase extends string> implements Histogram<Phase> {
 
 class DefaultGauge<Phase extends string> implements Gauge<Phase> {
   private readonly values = new Map<Phase, number>();
+  private readonly maxSeries: number;
+  private readonly warnOnce: () => void;
+
+  constructor(maxSeries: number = DEFAULT_MAX_SERIES, warnOnce: () => void = () => undefined) {
+    this.maxSeries = maxSeries;
+    this.warnOnce = warnOnce;
+  }
+
+  private resolve(phase: Phase): Phase {
+    if (this.values.has(phase) || (phase as string) === OVERFLOW_LABEL) return phase;
+    const realSize = this.values.has(OVERFLOW_LABEL as Phase)
+      ? this.values.size - 1
+      : this.values.size;
+    if (realSize >= this.maxSeries) {
+      this.warnOnce();
+      return OVERFLOW_LABEL as Phase;
+    }
+    return phase;
+  }
 
   set(phase: Phase, value: number): void {
-    this.values.set(phase, value);
+    this.values.set(this.resolve(phase), value);
   }
 
   inc(phase: Phase, amount = 1): void {
-    this.values.set(phase, (this.values.get(phase) ?? 0) + amount);
+    const target = this.resolve(phase);
+    this.values.set(target, (this.values.get(target) ?? 0) + amount);
   }
 
   dec(phase: Phase, amount = 1): void {
-    this.values.set(phase, (this.values.get(phase) ?? 0) - amount);
+    const target = this.resolve(phase);
+    this.values.set(target, (this.values.get(target) ?? 0) - amount);
   }
 
   get(phase: Phase): number {
@@ -169,6 +248,14 @@ export interface MetricsRegistryOptions<Phase extends string> {
   prefix: string;
   /** Custom histogram bucket boundaries in milliseconds. */
   histogramBuckets?: number[];
+  /**
+   * Maximum distinct series per metric (default 1000). Beyond it, new label
+   * sets are folded into an `__overflow__` series and a warning is logged
+   * once. Guards against unbounded cardinality (e.g. address/URL labels).
+   */
+  maxSeries?: number;
+  /** Called at most once when the series cap is first exceeded. */
+  onMaxSeriesExceeded?: () => void;
 }
 
 /**
@@ -187,9 +274,11 @@ export class MetricsRegistry<Phase extends string> {
   constructor(options: MetricsRegistryOptions<Phase>) {
     this.prefix = options.prefix;
     this.phases = options.phases;
-    this.counter = new DefaultCounter<Phase>();
-    this.histogram = new DefaultHistogram<Phase>(options.histogramBuckets);
-    this.gauge = new DefaultGauge<Phase>();
+    const maxSeries = options.maxSeries ?? DEFAULT_MAX_SERIES;
+    const warnOnce = makeWarnOnce(options.onMaxSeriesExceeded);
+    this.counter = new DefaultCounter<Phase>(maxSeries, warnOnce);
+    this.histogram = new DefaultHistogram<Phase>(options.histogramBuckets, maxSeries, warnOnce);
+    this.gauge = new DefaultGauge<Phase>(maxSeries, warnOnce);
   }
 
   /**
@@ -222,6 +311,11 @@ export class MetricsRegistry<Phase extends string> {
         const v = this.counter.get(phase, outcome);
         lines.push(`${counterName}{phase="${phase}",outcome="${outcome}"} ${v}`);
       }
+    }
+    const overflowTotal =
+      this.counter instanceof DefaultCounter ? this.counter.getOverflowTotal() : 0;
+    if (overflowTotal > 0) {
+      lines.push(`${counterName}{phase="${OVERFLOW_LABEL}",outcome="success"} ${overflowTotal}`);
     }
 
     // ── Histogram ────────────────────────────────────────────────────────────
