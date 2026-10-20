@@ -42,6 +42,17 @@ export interface Histogram<Phase extends string> {
   snapshot(phase: Phase): { count: number; sum: number; buckets: Map<number | '+Inf', number> };
 }
 
+/**
+ * A gauge holding a current value (e.g. queue depth, ledger lag, cache size)
+ * that can go up and down, keyed by phase.
+ */
+export interface Gauge<Phase extends string> {
+  set(phase: Phase, value: number): void;
+  inc(phase: Phase, amount?: number): void;
+  dec(phase: Phase, amount?: number): void;
+  get(phase: Phase): number;
+}
+
 // ── Counter implementation ────────────────────────────────────────────────────
 
 class DefaultCounter<Phase extends string> implements Counter<Phase> {
@@ -102,6 +113,28 @@ class DefaultHistogram<Phase extends string> implements Histogram<Phase> {
   }
 }
 
+// ── Gauge implementation ──────────────────────────────────────────────────────
+
+class DefaultGauge<Phase extends string> implements Gauge<Phase> {
+  private readonly values = new Map<Phase, number>();
+
+  set(phase: Phase, value: number): void {
+    this.values.set(phase, value);
+  }
+
+  inc(phase: Phase, amount = 1): void {
+    this.values.set(phase, (this.values.get(phase) ?? 0) + amount);
+  }
+
+  dec(phase: Phase, amount = 1): void {
+    this.values.set(phase, (this.values.get(phase) ?? 0) - amount);
+  }
+
+  get(phase: Phase): number {
+    return this.values.get(phase) ?? 0;
+  }
+}
+
 // ── No-op implementations (disabled metrics) ─────────────────────────────────
 
 class NoopCounter<Phase extends string> implements Counter<Phase> {
@@ -115,6 +148,15 @@ class NoopHistogram<Phase extends string> implements Histogram<Phase> {
   observe(_phase: Phase, _durationMs: number): void {}
   snapshot(_phase: Phase): { count: number; sum: number; buckets: Map<number | '+Inf', number> } {
     return { count: 0, sum: 0, buckets: new Map() };
+  }
+}
+
+class NoopGauge<Phase extends string> implements Gauge<Phase> {
+  set(_phase: Phase, _value: number): void {}
+  inc(_phase: Phase, _amount?: number): void {}
+  dec(_phase: Phase, _amount?: number): void {}
+  get(_phase: Phase): number {
+    return 0;
   }
 }
 
@@ -138,6 +180,7 @@ export interface MetricsRegistryOptions<Phase extends string> {
 export class MetricsRegistry<Phase extends string> {
   readonly counter: Counter<Phase>;
   readonly histogram: Histogram<Phase>;
+  readonly gauge: Gauge<Phase>;
   private readonly prefix: string;
   private readonly phases: Phase[];
 
@@ -146,6 +189,7 @@ export class MetricsRegistry<Phase extends string> {
     this.phases = options.phases;
     this.counter = new DefaultCounter<Phase>();
     this.histogram = new DefaultHistogram<Phase>(options.histogramBuckets);
+    this.gauge = new DefaultGauge<Phase>();
   }
 
   /**
@@ -194,6 +238,14 @@ export class MetricsRegistry<Phase extends string> {
       lines.push(`${histName}_count{phase="${phase}"} ${count}`);
     }
 
+    // ── Gauge ────────────────────────────────────────────────────────────────
+    const gaugeName = `${this.prefix}_gauge`;
+    lines.push(`# HELP ${gaugeName} Current gauge value by phase`);
+    lines.push(`# TYPE ${gaugeName} gauge`);
+    for (const phase of this.phases) {
+      lines.push(`${gaugeName}{phase="${phase}"} ${this.gauge.get(phase)}`);
+    }
+
     return lines.join('\n') + '\n';
   }
 }
@@ -207,6 +259,7 @@ export class MetricsRegistry<Phase extends string> {
 export class NoopMetricsRegistry<Phase extends string> {
   readonly counter: Counter<Phase> = new NoopCounter<Phase>();
   readonly histogram: Histogram<Phase> = new NoopHistogram<Phase>();
+  readonly gauge: Gauge<Phase> = new NoopGauge<Phase>();
 
   expose(): string {
     return '';

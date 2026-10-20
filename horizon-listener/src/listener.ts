@@ -203,6 +203,7 @@ export class HorizonListener {
       const pollDuration = Date.now() - pollStart;
       this.metrics.counter.inc('rpc_poll', 'success');
       this.metrics.histogram.observe('rpc_poll', pollDuration);
+      this.metrics.gauge.set('rpc_poll', response.events.length);
       pollSpan.setAttribute('poll.event_count', response.events.length);
       pollSpan.end('ok');
 

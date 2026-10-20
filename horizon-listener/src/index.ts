@@ -26,6 +26,7 @@ export {
   type Phase,
   type AnyMetricsRegistry,
   type Counter,
+  type Gauge,
   type Histogram,
   type Outcome,
   type MetricsRegistryOptions,
