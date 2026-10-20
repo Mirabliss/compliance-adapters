@@ -22,6 +22,22 @@
 
 export type Outcome = 'success' | 'failure' | 'cancelled';
 
+/**
+ * Escape a label value per the Prometheus exposition format:
+ * `\` → `\\`, `"` → `\"`, newline → `\n`.
+ */
+export function escapeLabelValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/"/g, '\\"');
+}
+
+/**
+ * Escape HELP text per the Prometheus exposition format:
+ * `\` → `\\`, newline → `\n`.
+ */
+export function escapeHelp(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/\n/g, '\\n');
+}
+
 /** A single counter: monotonically increasing integer keyed by phase+outcome. */
 export interface Counter<Phase extends string> {
   inc(phase: Phase, outcome: Outcome): void;
@@ -168,7 +184,7 @@ export class MetricsRegistry<Phase extends string> {
 
     // ── Counter ──────────────────────────────────────────────────────────────
     const counterName = `${this.prefix}_requests_total`;
-    lines.push(`# HELP ${counterName} Total requests by phase and outcome`);
+    lines.push(`# HELP ${counterName} ${escapeHelp('Total requests by phase and outcome')}`);
     lines.push(`# TYPE ${counterName} counter`);
 
     const outcomes: Outcome[] = ['success', 'failure', 'cancelled'];
@@ -176,22 +192,26 @@ export class MetricsRegistry<Phase extends string> {
     for (const phase of this.phases) {
       for (const outcome of outcomes) {
         const v = this.counter.get(phase, outcome);
-        lines.push(`${counterName}{phase="${phase}",outcome="${outcome}"} ${v}`);
+        lines.push(
+          `${counterName}{phase="${escapeLabelValue(phase)}",outcome="${escapeLabelValue(outcome)}"} ${v}`,
+        );
       }
     }
 
     // ── Histogram ────────────────────────────────────────────────────────────
     const histName = `${this.prefix}_duration_ms`;
-    lines.push(`# HELP ${histName}_bucket Histogram of phase durations in milliseconds`);
+    lines.push(`# HELP ${histName}_bucket ${escapeHelp('Histogram of phase durations in milliseconds')}`);
     lines.push(`# TYPE ${histName} histogram`);
 
     for (const phase of this.phases) {
       const { count, sum, buckets } = this.histogram.snapshot(phase);
       for (const [le, cumCount] of buckets) {
-        lines.push(`${histName}_bucket{phase="${phase}",le="${String(le)}"} ${cumCount}`);
+        lines.push(
+          `${histName}_bucket{phase="${escapeLabelValue(phase)}",le="${escapeLabelValue(String(le))}"} ${cumCount}`,
+        );
       }
-      lines.push(`${histName}_sum{phase="${phase}"} ${sum}`);
-      lines.push(`${histName}_count{phase="${phase}"} ${count}`);
+      lines.push(`${histName}_sum{phase="${escapeLabelValue(phase)}"} ${sum}`);
+      lines.push(`${histName}_count{phase="${escapeLabelValue(phase)}"} ${count}`);
     }
 
     return lines.join('\n') + '\n';
