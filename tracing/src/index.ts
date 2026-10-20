@@ -101,6 +101,14 @@ export interface TracingOptions {
    */
   sampler?: (spanName: string) => boolean;
   /**
+   * Probabilistic sampling ratio in [0, 1]. Root spans are sampled with
+   * `Math.random() < sampleRate`; children inherit the parent decision
+   * (parent-based sampling) via `TracingContext.sampled`. Unsampled spans
+   * become cheap no-ops. Defaults to 1 (sample everything). When both
+   * `sampler` and `sampleRate` are set, both must allow the span.
+   */
+  sampleRate?: number;
+  /**
    * When `true` (default), event/payload data is NOT attached to spans.
    * Set to `false` only in environments where payload logging is acceptable.
    */
@@ -198,19 +206,24 @@ class NoopSpan implements Span {
  */
 export class DefaultTracer implements Tracer {
   private readonly options: Required<
-    Omit<TracingOptions, 'exporter' | 'onExportError' | 'serviceName'>
+    Omit<TracingOptions, 'exporter' | 'onExportError' | 'serviceName' | 'sampleRate'>
   > & {
     exporter: SpanExporter | undefined;
     onExportError: ((error: unknown) => void) | undefined;
     serviceName: string | undefined;
+    sampleRate: number | undefined;
   };
   private readonly pending: Promise<void>[] = [];
   private shuttingDown = false;
 
   constructor(options: TracingOptions = {}) {
+    if (options.sampleRate !== undefined && (options.sampleRate < 0 || options.sampleRate > 1 || Number.isNaN(options.sampleRate))) {
+      throw new Error(`tracing: sampleRate must be in [0, 1], got ${options.sampleRate}`);
+    }
     this.options = {
       exporter: options.exporter,
       sampler: options.sampler ?? (() => true),
+      sampleRate: options.sampleRate,
       redactPayload: options.redactPayload !== false, // default true
       onExportError: options.onExportError,
       serviceName: options.serviceName,
@@ -218,8 +231,16 @@ export class DefaultTracer implements Tracer {
   }
 
   startSpan(name: string, parentContext?: TracingContext): Span {
-    if (this.shuttingDown || !this.options.sampler(name)) {
-      return new NoopSpan();
+    if (this.shuttingDown) return new NoopSpan();
+    // Parent-based sampling: inherit an explicit parent decision first.
+    if (parentContext?.sampled !== undefined) {
+      if (!parentContext.sampled) return new NoopSpan();
+    } else {
+      if (!this.options.sampler(name)) return new NoopSpan();
+      const rate = this.options.sampleRate;
+      if (rate !== undefined && !(rate >= 1) && (rate <= 0 || Math.random() >= rate)) {
+        return new NoopSpan();
+      }
     }
 
     const traceId = parentContext?.traceId ?? randomHex(16);
@@ -245,11 +266,11 @@ export class DefaultTracer implements Tracer {
     if (parts.length < 4 || parts[1].length !== 32 || parts[2].length !== 16) {
       return undefined;
     }
-    return { traceId: parts[1], spanId: parts[2] };
+    return { traceId: parts[1], spanId: parts[2], sampled: parts[3] === '01' };
   }
 
   injectContext(context: TracingContext): string {
-    return `00-${context.traceId}-${context.spanId}-01`;
+    return `00-${context.traceId}-${context.spanId}-${context.sampled === false ? '00' : '01'}`;
   }
 
   async shutdown(): Promise<void> {
