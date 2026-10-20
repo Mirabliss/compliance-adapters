@@ -1,6 +1,7 @@
 # compliance-adapters
 
 [![CI](https://github.com/stellar-compliance-kit/compliance-adapters/actions/workflows/ci.yml/badge.svg)](https://github.com/stellar-compliance-kit/compliance-adapters/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/stellar-compliance-kit/compliance-adapters/badge)](https://scorecard.dev/viewer/?uri=github.com/stellar-compliance-kit/compliance-adapters)
 
 Integration adapters connecting Stellar compliance primitives to SEP-10 auth, sanctions oracles, and Horizon/RPC event streams.
 
