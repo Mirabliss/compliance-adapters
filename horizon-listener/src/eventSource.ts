@@ -77,7 +77,23 @@ export interface RpcEventSourceOptions {
   // If the call takes longer than this, it will be rejected.
   // Left undefined, no timeout is applied (relies on SDK's default).
   timeoutMs?: number;
+  /**
+   * Optional topic filters passed through to Soroban RPC `getEvents`. Each
+   * filter is an array of 1-4 topic segments (base64 XDR `ScVal` strings),
+   * where `*` matches any single segment. Events matching any filter are
+   * returned. Left undefined, all topics are returned.
+   */
+  topics?: string[][];
+  /**
+   * Which event types to request: `contract` (default), `system`,
+   * `diagnostic`, or `all` (no type restriction).
+   */
+  eventType?: RpcEventType;
 }
+
+export type RpcEventType = 'contract' | 'system' | 'diagnostic' | 'all';
+
+const EVENT_TYPES: readonly RpcEventType[] = ['contract', 'system', 'diagnostic', 'all'];
 
 // Real Soroban RPC request/response shapes vary slightly by SDK minor version and
 // require live network access to validate, so this class is intentionally kept out
@@ -99,7 +115,42 @@ export class RpcEventSource implements EventSource {
         'horizon-listener: RpcEventSource requires at least one contract ID (contractIds array cannot be empty)',
       );
     }
+    if (options.topics !== undefined) {
+      if (!Array.isArray(options.topics)) {
+        throw new Error('horizon-listener: RpcEventSource `topics` must be an array of topic filters');
+      }
+      options.topics.forEach((filter, i) => {
+        if (
+          !Array.isArray(filter) ||
+          filter.length === 0 ||
+          filter.length > 4 ||
+          !filter.every((segment) => typeof segment === 'string' && segment.length > 0)
+        ) {
+          throw new Error(
+            `horizon-listener: RpcEventSource invalid topic filter at index ${i} ` +
+              '(expected 1-4 non-empty string segments; use "*" as a wildcard)',
+          );
+        }
+      });
+    }
+    if (options.eventType !== undefined && !EVENT_TYPES.includes(options.eventType)) {
+      throw new Error(
+        `horizon-listener: RpcEventSource invalid eventType "${String(options.eventType)}" ` +
+          `(expected one of ${EVENT_TYPES.join(', ')})`,
+      );
+    }
     this.options = options;
+  }
+
+  /** Builds the `filters` array sent with every getEvents request. */
+  buildFilters(): Record<string, unknown>[] {
+    const eventType = this.options.eventType ?? 'contract';
+    const filter: Record<string, unknown> = { contractIds: this.options.contractIds };
+    if (eventType !== 'all') filter.type = eventType;
+    if (this.options.topics && this.options.topics.length > 0) {
+      filter.topics = this.options.topics;
+    }
+    return [filter];
   }
 
   private getServer(): rpc.Server {
@@ -128,11 +179,11 @@ export class RpcEventSource implements EventSource {
       cursor
         ? {
             cursor,
-            filters: [{ type: 'contract', contractIds: this.options.contractIds }],
+            filters: this.buildFilters(),
           }
         : {
             startLedger: this.options.startLedger,
-            filters: [{ type: 'contract', contractIds: this.options.contractIds }],
+            filters: this.buildFilters(),
           }
     ) as GetEventsRequest;
 

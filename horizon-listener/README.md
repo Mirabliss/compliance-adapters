@@ -287,6 +287,69 @@ If `signingSecret` is omitted, `HttpWebhookSender` sends requests without
 `X-Timestamp` or `X-Signature` headers, exactly as before this feature was
 added.
 
+## Event filters (`topics`, `eventType`)
+
+`RpcEventSource` can push filtering down to the RPC so you don't download
+events you will discard:
+
+```ts
+new RpcEventSource({
+  rpcUrl, networkPassphrase, contractIds, startLedger,
+  // Each filter is 1-4 topic segments (base64 XDR ScVal); "*" matches any segment.
+  topics: [['AAAADwAAAA9kZW55bGlzdF9hZGRlZAA=', '*']],
+  // 'contract' (default) | 'system' | 'diagnostic' | 'all'
+  eventType: 'contract',
+});
+```
+
+Invalid filter shapes (non-array, empty, more than 4 segments, non-string
+segments) and unknown `eventType` values throw at construction. The default
+`eventType` remains `'contract'`, matching previous behaviour.
+
+## Multiple webhook targets (`MultiWebhookSender`)
+
+`MultiWebhookSender` delivers each event to several senders concurrently.
+Each target owns its retry/backoff (via its own `HttpWebhookSender`) and an
+optional per-target DLQ, so one slow or failing target never blocks the others.
+
+```ts
+const sender = new MultiWebhookSender({
+  targets: [
+    { name: 'siem', sender: new HttpWebhookSender({ url: SIEM_URL }), deadLetterQueue: siemDlq },
+    { name: 'warehouse', sender: new HttpWebhookSender({ url: DWH_URL }), required: false },
+  ],
+});
+```
+
+- **Required** targets (default): the event is acknowledged only when every
+  required target confirms delivery. If any fails, it is dead-lettered to that
+  target's DLQ and `send` rejects with `MultiWebhookDeliveryError`.
+- **Optional** targets (`required: false`): failures are dead-lettered to the
+  target's DLQ (if configured) but never block acknowledgement.
+
+Note that when a required target fails, targets that already succeeded may
+receive the event again if the caller retries `send`; receivers should
+deduplicate on `event.id`.
+
+## Payload schema versioning
+
+Every webhook delivery carries an `X-Compliance-Schema-Version` header and a
+`schemaVersion` field in the JSON body (currently `1`, exported as
+`WEBHOOK_SCHEMA_VERSION`):
+
+```json
+{ "schemaVersion": 1, "event": { "id": "...", "contractId": "C...", "ledger": 123, "topic": [], "value": {} } }
+```
+
+Versioning policy:
+
+- Additive, backward-compatible changes (new optional fields) do **not** bump
+  the version; receivers must ignore unknown fields.
+- Removing or renaming fields, or changing a field's type or meaning, bumps
+  the version and is called out in the changelog.
+- Receivers should branch on the header/field rather than inferring the shape,
+  so senders and receivers can be upgraded independently.
+
 ## Reconnect / backoff behavior
 
 If `eventSource.getEvents(...)` throws (RPC unreachable, rate-limited, cursor
