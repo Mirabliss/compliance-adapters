@@ -37,6 +37,20 @@ Each package has its own `README.md`, tests, and `package.json`.
 Runnable examples live under [`examples/`](./examples). Each is a self-contained npm workspace
 that wires the adapters together in a realistic scenario.
 
+### [`examples/sep10-browser-login`](./examples/sep10-browser-login)
+
+A Vite + vanilla TypeScript single-page app that demonstrates the **client-side**
+SEP-10 flow using the [Freighter](https://www.freighter.app/) browser wallet:
+
+1. Connect Freighter and obtain the user's Stellar public key.
+2. `GET /auth?account=<G…>` — fetch an unsigned challenge XDR from the example server.
+3. Sign the XDR in-browser via Freighter's `signTransaction()` API.
+4. `POST /auth { transaction }` — submit the signed XDR; receive a JWT.
+5. Store the JWT in `sessionStorage` and display it for use as a Bearer token.
+
+Runs against the `full-stack-demo` server (or any SEP-10-compliant API) via a
+Vite dev-server proxy. No CORS configuration required during development.
+
 ### [`examples/sep10-sanctions-gate`](./examples/sep10-sanctions-gate)
 
 An Express server exposing a single gated route (`GET /gated`) that composes `sep10-auth` and

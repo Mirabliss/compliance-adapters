@@ -18,6 +18,7 @@
     "horizon-listener",
     "examples/full-stack-demo",
     "examples/sep10-sanctions-gate",
+    "examples/sep10-browser-login",
     "e2e-tests",
     "backoff",
     "metrics",
