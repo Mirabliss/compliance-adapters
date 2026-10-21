@@ -1,0 +1,48 @@
+# Keep the Docker build context lean.
+# The multi-stage Dockerfile copies only what it needs explicitly.
+
+# Version control
+.git
+.gitattributes
+.gitignore
+
+# Node artefacts (will be reinstalled inside the image)
+node_modules
+**/node_modules
+
+# Compiled output (rebuilt inside the builder stage)
+**/dist
+
+# Test artefacts
+**/coverage
+**/__snapshots__
+**/test
+**/bench
+
+# Examples and e2e fixtures (not needed in the image)
+examples/
+e2e-tests/
+
+# Docs and markdown
+*.md
+docs/
+.changeset/
+
+# Editor / IDE
+.editorconfig
+.vscode/
+.idea/
+
+# Kiro
+.kiro/
+
+# Environment files (must be supplied at runtime via env vars or secrets)
+.env
+.env.*
+!.env.example
+
+# CI / GitHub
+.github/
+
+# Scripts not needed at runtime
+scripts/
