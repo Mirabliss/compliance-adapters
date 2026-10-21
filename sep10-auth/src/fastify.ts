@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest, FastifyInstance } from 'fastify';
 import fp from 'fastify-plugin';
 import { noopLogger } from '@compliance-adapters/logger';
 import {
@@ -12,6 +12,7 @@ import {
   assertSep10MiddlewareOptions,
   verifyRequestHeaders,
 } from './middleware';
+import { makeErrorBody, Sep10ErrorCode } from './errors';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -56,7 +57,7 @@ export interface Sep10FastifyOptions extends Sep10MiddlewareOptions {
  * ```
  */
 export const sep10Plugin: FastifyPluginAsync<Sep10FastifyOptions> = fp(
-  async (fastify, options) => {
+  async (fastify: FastifyInstance, options: Sep10FastifyOptions) => {
     const logger = options.logger ?? noopLogger;
     assertSep10MiddlewareOptions(options);
 
@@ -80,10 +81,25 @@ export const sep10Plugin: FastifyPluginAsync<Sep10FastifyOptions> = fp(
           ip: request.ip,
           path: request.url,
         });
+
+        // Map the internal reason to a Sep10ErrorCode
+        let code: Sep10ErrorCode;
+        if (result.reason === 'address revoked' || result.reason === 'token revoked') {
+          code = 'token_revoked';
+        } else if (result.reason === 'bearer token too large') {
+          code = 'token_too_large';
+        } else if (result.reason === 'malformed bearer token') {
+          code = 'malformed_token';
+        } else if (result.error === 'invalid_request') {
+          code = 'missing_token';
+        } else {
+          code = 'invalid_token';
+        }
+
         reply
           .code(401)
           .header('WWW-Authenticate', result.wwwAuthenticate)
-          .send({ error: 'unauthorized', reason: result.reason });
+          .send(makeErrorBody('unauthorized', code, { reason: result.reason }));
         return;
       }
 

@@ -16,6 +16,7 @@ import {
 import { verifyChallenge } from './verify';
 import { issueJwt } from './jwt';
 import { rateLimiter, RateLimiterOptions } from './rate-limiter';
+import { makeErrorBody } from './errors';
 
 export interface Sep10RouterOptions {
   /** Server keypair used to sign challenge transactions. Must be able to sign. */
@@ -138,13 +139,13 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
     try {
       const account = firstString(req.query.account);
       if (!account) {
-        res.status(400).json({ error: 'missing required "account" query parameter' });
+        res.status(400).json(makeErrorBody('missing required "account" query parameter', 'missing_account'));
         return;
       }
 
       const homeDomain = firstString(req.query.home_domain) ?? homeDomains[0];
       if (!homeDomains.includes(homeDomain)) {
-        res.status(400).json({ error: 'invalid "home_domain" query parameter' });
+        res.status(400).json(makeErrorBody('invalid "home_domain" query parameter', 'invalid_home_domain'));
         return;
       }
 
@@ -153,7 +154,7 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
       let clientSigningKey: string | undefined;
       if (clientDomain) {
         if (!options.resolveClientSigningKey) {
-          res.status(400).json({ error: '"client_domain" is not supported' });
+          res.status(400).json(makeErrorBody('"client_domain" is not supported', 'client_domain_unsupported'));
           return;
         }
         try {
@@ -164,7 +165,7 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
             clientDomain,
             error,
           });
-          res.status(400).json({ error: 'invalid "client_domain" query parameter' });
+          res.status(400).json(makeErrorBody('invalid "client_domain" query parameter', 'invalid_client_domain'));
           return;
         }
       }
@@ -186,15 +187,15 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
       });
     } catch (error) {
       if (error instanceof InvalidClientAddressError) {
-        res.status(400).json({ error: 'invalid "account" query parameter' });
+        res.status(400).json(makeErrorBody('invalid "account" query parameter', 'invalid_account'));
         return;
       }
       if (error instanceof InvalidMemoError) {
-        res.status(400).json({ error: 'invalid "memo" query parameter' });
+        res.status(400).json(makeErrorBody('invalid "memo" query parameter', 'invalid_memo'));
         return;
       }
       if (error instanceof InvalidDomainError) {
-        res.status(400).json({ error: 'invalid domain parameter' });
+        res.status(400).json(makeErrorBody('invalid domain parameter', 'invalid_domain'));
         return;
       }
       next(error);
@@ -205,11 +206,11 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
     try {
       const transaction = firstString(req.body?.transaction);
       if (!transaction) {
-        res.status(400).json({ error: 'missing required "transaction" parameter' });
+        res.status(400).json(makeErrorBody('missing required "transaction" parameter', 'missing_transaction'));
         return;
       }
       if (transaction.length > maxTransactionLength) {
-        res.status(400).json({ error: '"transaction" is too large' });
+        res.status(400).json(makeErrorBody('"transaction" is too large', 'transaction_too_large'));
         return;
       }
 
@@ -222,7 +223,7 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
 
       if (!result.valid) {
         logger.warn('sep10-auth: challenge verification failed', { reason: result.error });
-        res.status(400).json({ error: result.error ?? 'invalid challenge transaction' });
+        res.status(400).json(makeErrorBody(result.error ?? 'invalid challenge transaction', 'invalid_transaction'));
         return;
       }
 

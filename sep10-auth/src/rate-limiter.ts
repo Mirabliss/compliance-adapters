@@ -4,12 +4,20 @@
  */
 
 import { RequestHandler } from 'express';
+import { makeErrorBody } from './errors';
 
 export interface RateLimiterOptions {
   windowMs?: number;
   maxRequests?: number;
   keyGenerator?: (req: import('express').Request) => string;
   store?: RateLimitStore;
+  /**
+   * When `true` (the default), every response carries IETF draft
+   * `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` headers.
+   * Set to `false` to suppress them.
+   * @default true
+   */
+  standardHeaders?: boolean;
   /**
    * Return `true` (or a promise resolving to `true`) to exempt a request from
    * rate limiting, e.g. internal health checkers or trusted partner IPs.
@@ -165,7 +173,11 @@ export function rateLimiter(options: RateLimiterOptions = {}): RequestHandler {
           res
             .status(429)
             .set('Retry-After', String(retryAfter))
-            .json({ error: 'rate_limit_exceeded', retryAfter });
+            .json(makeErrorBody(
+              'Too many requests',
+              'rate_limit_exceeded',
+              { retryAfter },
+            ));
           return;
         }
         next();

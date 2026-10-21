@@ -130,7 +130,7 @@ describe('rateLimiter', () => {
 
     expect(res.status).toHaveBeenCalledWith(429);
     expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ error: 'rate_limit_exceeded' }),
+      expect.objectContaining({ error: 'Too many requests', code: 'rate_limit_exceeded' }),
     );
     expect(next).toHaveBeenCalledTimes(3); // next not called for blocked request
   });
@@ -144,8 +144,9 @@ describe('rateLimiter', () => {
     expect(res.status).toHaveBeenCalledWith(429);
     expect(res.json).toHaveBeenCalledWith(
       expect.objectContaining({
-        error: 'rate_limit_exceeded',
-        retryAfter: expect.any(Number),
+        error: 'Too many requests',
+        code: 'rate_limit_exceeded',
+        details: expect.objectContaining({ retryAfter: expect.any(Number) }),
       }),
     );
     expect(res.set).toHaveBeenCalledWith(

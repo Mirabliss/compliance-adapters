@@ -287,7 +287,8 @@ describe('createSep10Router', () => {
       const throttled = await request(app).get('/auth').query({ account });
 
       expect(throttled.status).toBe(429);
-      expect(throttled.body.error).toBe('rate_limit_exceeded');
+      expect(throttled.body.error).toBe('Too many requests');
+      expect(throttled.body.code).toBe('rate_limit_exceeded');
     });
 
     it('can be disabled', async () => {

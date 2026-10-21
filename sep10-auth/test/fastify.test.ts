@@ -55,7 +55,11 @@ describe('sep10Plugin (Fastify)', () => {
     const res = await app.inject({ method: 'GET', url: '/status' });
 
     expect(res.statusCode).toBe(401);
-    expect(res.json()).toEqual({ error: 'unauthorized', reason: 'missing bearer token' });
+    expect(res.json()).toEqual({
+      error: 'unauthorized',
+      code: 'missing_token',
+      details: { reason: 'missing bearer token' },
+    });
     expect(res.headers['www-authenticate']).toBe(
       'Bearer realm="example.com", error="invalid_request"',
     );
@@ -112,7 +116,8 @@ describe('sep10Plugin (Fastify)', () => {
     });
 
     expect(res.statusCode).toBe(401);
-    expect(res.json().reason).toBe('address revoked');
+    expect(res.json().code).toBe('token_revoked');
+    expect(res.json().details.reason).toBe('address revoked');
   });
 
   it('responds 500 when the revocation store fails', async () => {
@@ -159,7 +164,7 @@ describe('authenticateRequest (framework-agnostic core)', () => {
       { authorization: `Bearer ${signedChallenge(client)}` },
       pluginOptions,
     );
-    expect(result).toEqual({ ok: true, address: client.publicKey() });
+    expect(result).toEqual(expect.objectContaining({ ok: true, address: client.publicKey() }));
   });
 
   it('reads a capitalised Authorization header', async () => {

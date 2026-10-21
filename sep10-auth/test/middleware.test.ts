@@ -110,7 +110,8 @@ describe('createSep10Middleware', () => {
       expect(res.status).toHaveBeenCalledWith(401);
       expect(res.json).toHaveBeenCalledWith({
         error: 'unauthorized',
-        reason: 'missing bearer token',
+        code: 'missing_token',
+        details: { reason: 'missing bearer token' },
       });
       expect(res.set).toHaveBeenCalledWith(
         'WWW-Authenticate',
@@ -188,7 +189,8 @@ describe('createSep10Middleware', () => {
       expect(res.status).toHaveBeenCalledWith(401);
       expect(res.json).toHaveBeenCalledWith({
         error: 'unauthorized',
-        reason: 'bearer token too large',
+        code: 'token_too_large',
+        details: { reason: 'bearer token too large' },
       });
       expect(next).not.toHaveBeenCalled();
     });
@@ -209,7 +211,8 @@ describe('createSep10Middleware', () => {
       expect(res.status).toHaveBeenCalledWith(401);
       expect(res.json).toHaveBeenCalledWith({
         error: 'unauthorized',
-        reason: 'bearer token too large',
+        code: 'token_too_large',
+        details: { reason: 'bearer token too large' },
       });
       expect(mockLogger.warn).toHaveBeenCalledWith(
         'sep10-auth: bearer token exceeds maximum length',
@@ -272,7 +275,8 @@ describe('createSep10Middleware', () => {
       expect(res.status).toHaveBeenCalledWith(401);
       expect(res.json).toHaveBeenCalledWith({
         error: 'unauthorized',
-        reason: 'Transaction has expired',
+        code: 'invalid_token',
+        details: { reason: 'Transaction has expired' },
       });
       expect(mockLogger.warn).toHaveBeenCalledWith(
         'sep10-auth: challenge verification failed',
@@ -319,7 +323,8 @@ describe('createSep10Middleware', () => {
       expect(res.status).toHaveBeenCalledWith(401);
       expect(res.json).toHaveBeenCalledWith({
         error: 'unauthorized',
-        reason: 'address revoked',
+        code: 'token_revoked',
+        details: { reason: 'address revoked' },
       });
       expect(mockLogger.warn).toHaveBeenCalledWith(
         'sep10-auth: address is revoked',
@@ -408,7 +413,7 @@ describe('createSep10Middleware', () => {
 
         expect(mockStore.isTokenRevoked).toHaveBeenCalledWith(jti);
         expect(res.status).toHaveBeenCalledWith(401);
-        expect(res.json).toHaveBeenCalledWith({ error: 'unauthorized', reason: 'token revoked' });
+        expect(res.json).toHaveBeenCalledWith({ error: 'unauthorized', code: 'token_revoked', details: { reason: 'token revoked' } });
         expect(next).not.toHaveBeenCalled();
       });
 
@@ -445,7 +450,7 @@ describe('createSep10Middleware', () => {
 
         await middleware(makeReq('Bearer some-xdr'), res, next);
 
-        expect(res.json).toHaveBeenCalledWith({ error: 'unauthorized', reason: 'address revoked' });
+        expect(res.json).toHaveBeenCalledWith({ error: 'unauthorized', code: 'token_revoked', details: { reason: 'address revoked' } });
         expect(mockStore.isTokenRevoked).not.toHaveBeenCalled();
       });
 
