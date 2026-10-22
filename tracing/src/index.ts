@@ -101,6 +101,14 @@ export interface TracingOptions {
    */
   sampler?: (spanName: string) => boolean;
   /**
+   * Probabilistic sampling ratio in [0, 1]. Root spans are sampled with
+   * `Math.random() < sampleRate`; children inherit the parent decision
+   * (parent-based sampling) via `TracingContext.sampled`. Unsampled spans
+   * become cheap no-ops. Defaults to 1 (sample everything). When both
+   * `sampler` and `sampleRate` are set, both must allow the span.
+   */
+  sampleRate?: number;
+  /**
    * When `true` (default), event/payload data is NOT attached to spans.
    * Set to `false` only in environments where payload logging is acceptable.
    */
@@ -198,19 +206,24 @@ class NoopSpan implements Span {
  */
 export class DefaultTracer implements Tracer {
   private readonly options: Required<
-    Omit<TracingOptions, 'exporter' | 'onExportError' | 'serviceName'>
+    Omit<TracingOptions, 'exporter' | 'onExportError' | 'serviceName' | 'sampleRate'>
   > & {
     exporter: SpanExporter | undefined;
     onExportError: ((error: unknown) => void) | undefined;
     serviceName: string | undefined;
+    sampleRate: number | undefined;
   };
   private readonly pending: Promise<void>[] = [];
   private shuttingDown = false;
 
   constructor(options: TracingOptions = {}) {
+    if (options.sampleRate !== undefined && (options.sampleRate < 0 || options.sampleRate > 1 || Number.isNaN(options.sampleRate))) {
+      throw new Error(`tracing: sampleRate must be in [0, 1], got ${options.sampleRate}`);
+    }
     this.options = {
       exporter: options.exporter,
       sampler: options.sampler ?? (() => true),
+      sampleRate: options.sampleRate,
       redactPayload: options.redactPayload !== false, // default true
       onExportError: options.onExportError,
       serviceName: options.serviceName,
@@ -218,8 +231,16 @@ export class DefaultTracer implements Tracer {
   }
 
   startSpan(name: string, parentContext?: TracingContext): Span {
-    if (this.shuttingDown || !this.options.sampler(name)) {
-      return new NoopSpan();
+    if (this.shuttingDown) return new NoopSpan();
+    // Parent-based sampling: inherit an explicit parent decision first.
+    if (parentContext?.sampled !== undefined) {
+      if (!parentContext.sampled) return new NoopSpan();
+    } else {
+      if (!this.options.sampler(name)) return new NoopSpan();
+      const rate = this.options.sampleRate;
+      if (rate !== undefined && !(rate >= 1) && (rate <= 0 || Math.random() >= rate)) {
+        return new NoopSpan();
+      }
     }
 
     const traceId = parentContext?.traceId ?? randomHex(16);
@@ -245,11 +266,11 @@ export class DefaultTracer implements Tracer {
     if (parts.length < 4 || parts[1].length !== 32 || parts[2].length !== 16) {
       return undefined;
     }
-    return { traceId: parts[1], spanId: parts[2] };
+    return { traceId: parts[1], spanId: parts[2], sampled: parts[3] === '01' };
   }
 
   injectContext(context: TracingContext): string {
-    return `00-${context.traceId}-${context.spanId}-01`;
+    return `00-${context.traceId}-${context.spanId}-${context.sampled === false ? '00' : '01'}`;
   }
 
   async shutdown(): Promise<void> {
@@ -292,10 +313,143 @@ export class NoopTracer implements Tracer {
   }
 
   injectContext(context: TracingContext): string {
+    return `00-${context.traceId}-${context.spanId}-${context.sampled === false ? '00' : '01'}`;
+  }
+
+  async shutdown(): Promise<void> {}
+}
+
+export function extractTraceContext(
+  headers: Record<string, string | string[] | undefined> | Headers,
+  tracer?: Tracer,
+): TracingContext | undefined {
+  let raw: string | undefined;
+  if (typeof (headers as Headers).get === 'function') {
+    raw = (headers as Headers).get('traceparent') ?? undefined;
+  } else {
+    const rec = headers as Record<string, string | string[] | undefined>;
+    for (const key of Object.keys(rec ?? {})) {
+      if (key.toLowerCase() === 'traceparent') {
+        const v = rec[key];
+        raw = Array.isArray(v) ? v[0] : v;
+        break;
+      }
+    }
+  }
+  if (!raw) return undefined;
+  return (tracer ?? new DefaultTracer()).extractContext(raw);
+}
+
+export type AnyTracer = DefaultTracer | NoopTracer;
+
+// ── OpenTelemetry bridge ──────────────────────────────────────────────────────
+
+/**
+ * Minimal structural view of an OpenTelemetry span. Declared locally so
+ * `@opentelemetry/api` stays an optional peer dependency — this module never
+ * imports it at runtime.
+ */
+export interface OtelSpanLike {
+  setAttribute(key: string, value: string | number | boolean): unknown;
+  setStatus(status: { code: number; message?: string }): unknown;
+  recordException?(error: Error): unknown;
+  end(): void;
+  spanContext?(): { traceId: string; spanId: string };
+}
+
+/**
+ * Minimal structural view of an OpenTelemetry tracer (e.g. the result of
+ * `trace.getTracer(name)` from `@opentelemetry/api`).
+ */
+export interface OtelTracerLike {
+  startSpan(name: string, options?: unknown, context?: unknown): OtelSpanLike;
+}
+
+/** OTel `SpanStatusCode`: UNSET=0, OK=1, ERROR=2. */
+const OTEL_STATUS = { UNSET: 0, OK: 1, ERROR: 2 } as const;
+
+class OtelSpanAdapter implements Span {
+  readonly traceId: string;
+  readonly spanId: string;
+
+  constructor(
+    private readonly otelSpan: OtelSpanLike,
+    traceId: string,
+    spanId: string,
+  ) {
+    this.traceId = traceId;
+    this.spanId = spanId;
+  }
+
+  setAttribute(key: string, value: string | number | boolean): void {
+    this.otelSpan.setAttribute(key, value);
+  }
+
+  end(status: SpanStatus = 'ok', error?: Error): void {
+    if (status === 'ok') {
+      this.otelSpan.setStatus({ code: OTEL_STATUS.OK });
+    } else if (status === 'error') {
+      this.otelSpan.setStatus({ code: OTEL_STATUS.ERROR, message: error?.message });
+      if (error && typeof this.otelSpan.recordException === 'function') {
+        this.otelSpan.recordException(error);
+      }
+    } else {
+      this.otelSpan.setStatus({ code: OTEL_STATUS.ERROR, message: 'cancelled' });
+    }
+    this.otelSpan.end();
+  }
+}
+
+class OtelTracerAdapter implements Tracer {
+  constructor(private readonly otelTracer: OtelTracerLike) {}
+
+  startSpan(name: string, _parentContext?: TracingContext): Span {
+    const otelSpan = this.otelTracer.startSpan(name);
+    const ctx = typeof otelSpan.spanContext === 'function' ? otelSpan.spanContext() : undefined;
+    return new OtelSpanAdapter(
+      otelSpan,
+      ctx?.traceId ?? randomHex(16),
+      ctx?.spanId ?? randomHex(8),
+    );
+  }
+
+  extractContext(traceparent: string | undefined): TracingContext | undefined {
+    if (!traceparent) return undefined;
+    const parts = traceparent.split('-');
+    if (parts.length < 4 || parts[1].length !== 32 || parts[2].length !== 16) {
+      return undefined;
+    }
+    return { traceId: parts[1], spanId: parts[2] };
+  }
+
+  injectContext(context: TracingContext): string {
     return `00-${context.traceId}-${context.spanId}-01`;
   }
 
   async shutdown(): Promise<void> {}
 }
 
-export type AnyTracer = DefaultTracer | NoopTracer;
+/**
+ * Bridge the internal {@link Tracer} interface on top of an OpenTelemetry
+ * tracer, enabling export to Jaeger, Tempo, Datadog, or any OTel backend.
+ *
+ * `@opentelemetry/api` is an optional peer dependency — pass any object
+ * satisfying the {@link OtelTracerLike} shape (e.g. `trace.getTracer(name)`).
+ *
+ * Status mapping: `ok` → `SpanStatusCode.OK`, `error` → `ERROR` (with the
+ * error message), `cancelled` → `ERROR` with message `'cancelled'`.
+ *
+ * @example
+ * ```ts
+ * import { trace } from '@opentelemetry/api';
+ * import { createOtelTracer } from '@compliance-adapters/tracing';
+ *
+ * const tracer = createOtelTracer(trace.getTracer('compliance-adapters'));
+ * const span = tracer.startSpan('address_check');
+ * span.setAttribute('phase', 'address_check');
+ * span.end('ok');
+ * ```
+ */
+export function createOtelTracer(otelTracer: OtelTracerLike): Tracer {
+  return new OtelTracerAdapter(otelTracer);
+}

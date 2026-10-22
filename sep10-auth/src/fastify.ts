@@ -64,7 +64,7 @@ export const sep10Plugin: FastifyPluginAsync<Sep10FastifyOptions> = fp(
     fastify.decorateRequest('stellarAddress', undefined);
 
     const authenticate = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-      let result = verifyRequestHeaders(request.headers, options);
+      let result = await verifyRequestHeaders(request.headers, options);
 
       if (result.ok && options.revocationStore) {
         try {

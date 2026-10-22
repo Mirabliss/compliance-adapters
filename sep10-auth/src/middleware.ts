@@ -139,6 +139,10 @@ const DEFAULT_MAX_TOKEN_LENGTH = 8192;
  */
 export type BearerErrorCode = 'invalid_request' | 'invalid_token';
 
+function buildWwwAuthenticate(realm: string, error: BearerErrorCode): string {
+  return `Bearer realm="${realm}", error="${error}"`;
+}
+
 /** Request headers as exposed by Node's `http` module and Fastify. */
 export type RequestHeaders = Record<string, string | string[] | undefined>;
 
@@ -195,14 +199,14 @@ export function assertSep10MiddlewareOptions(options: Sep10MiddlewareOptions): s
 }
 
 /**
- * Synchronous half of {@link authenticateRequest}: parses the `Authorization`
- * header and verifies the signed challenge. It does not consult the revocation
- * store, so it can answer without yielding to the event loop.
+ * Verifies the `Authorization` header and signed challenge. It does not
+ * consult the revocation store, so callers needing revocation checks should
+ * use {@link authenticateRequest} instead.
  */
-export function verifyRequestHeaders(
+export async function verifyRequestHeaders(
   headers: RequestHeaders,
   options: Sep10MiddlewareOptions,
-): AuthenticateRequestResult {
+): Promise<AuthenticateRequestResult> {
   const maxTokenLength = options.maxTokenLength ?? DEFAULT_MAX_TOKEN_LENGTH;
   const realm = Array.isArray(options.homeDomains) ? options.homeDomains[0] : options.homeDomains;
 
@@ -244,7 +248,7 @@ export function verifyRequestHeaders(
     );
   }
 
-  const result = verifyChallenge(token, options);
+  const result = await verifyChallenge(token, options);
 
   if (!result.valid) {
     return fail(
@@ -316,7 +320,7 @@ export async function authenticateRequest(
   headers: RequestHeaders,
   options: Sep10MiddlewareOptions,
 ): Promise<AuthenticateRequestResult> {
-  return applyRevocationStore(verifyRequestHeaders(headers, options), options);
+  return applyRevocationStore(await verifyRequestHeaders(headers, options), options);
 }
 
 // Reference pattern only: expects the raw signed SEP-10 challenge XDR on every

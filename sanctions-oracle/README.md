@@ -108,9 +108,9 @@ addresses currently on the denylist); combine with `--dry-run` to preview.
 
 ### Resuming an interrupted sync
 
-Pass a `SyncOptions.checkpoint` store (interface `SyncCheckpointStore`, with
-an in-memory reference implementation `InMemoryCheckpointStore` — same
-"bring your own persistence" pattern as sep10-auth's `RevocationStore`) and
+Pass a `SyncOptions.checkpoint` store (interface `CheckpointStore`, with
+`FileCheckpointStore`, `RedisCheckpointStore`, and an in-memory reference
+implementation `InMemoryCheckpointStore`) and
 the sync records each address as it finishes: clean addresses right after
 the provider check, flagged addresses only once their denylist write
 succeeds. On a later run with `resume: true`, any address the checkpoint
@@ -118,6 +118,35 @@ already reports as complete is skipped (reported in `SyncResult.skipped`)
 instead of being re-checked and re-written — so a large sync that crashed
 after writing 500 of 2000 addresses picks up from 501 rather than paying
 the fees to re-write the first 500.
+
+### Persisting checkpoints to a file
+
+`FileCheckpointStore(path, logger?)` persists completed addresses as a JSON
+array. Writes are atomic (written to `<path>.tmp`, then renamed), and a
+corrupt or truncated file is moved aside to `<path>.corrupt-<timestamp>` with a
+warning instead of crashing the sync. From the CLI, pass `--checkpoint <path>`
+to enable it for a live sync (resume is automatic).
+
+### Durable audit log (JSONL)
+
+`createJsonlAuditLogger(path, { fsync? })` returns an `AuditLogger` that
+appends one JSON line (with its ISO 8601 `timestamp`) per denylist write to an
+append-only file. Writes are serialized so concurrent events never interleave;
+set `fsync: true` to flush each line to disk. From the CLI, use
+`--audit-log <path>`.
+
+### Machine-readable CLI output (`--json`)
+
+With `--json`, stdout contains only the final `SyncResult` as JSON and all
+progress logs go to stderr, so CI and cron wrappers can pipe it straight into
+`jq`. Exit codes are unchanged.
+
+### Example: Chainalysis provider
+
+[`examples/providers/chainalysis.ts`](../examples/providers/chainalysis.ts)
+adapts the free Chainalysis sanctions screening API to `SanctionsProvider`
+(API key via `CHAINALYSIS_API_KEY`, response mapping, and
+`RateLimitedSanctionsProvider` wrapping).
 
 ## The `SanctionsProvider` interface
 
@@ -704,3 +733,52 @@ flagged address using `@stellar/stellar-sdk`'s `Contract`,
 - Root repo [README](../README.md)
 - [compliance-primitives](https://github.com/stellar-compliance-kit/compliance-primitives) —
   the Soroban contracts (including `denylist-gate`) this package talks to.
+
+## Circuit breaker
+
+Wrap any provider with `CircuitBreakerSanctionsProvider` so a dead upstream fails fast instead of every address waiting out the full retry cycle. It composes with `RateLimitedSanctionsProvider` and `ProviderRegistry`.
+
+```ts
+const provider = new CircuitBreakerSanctionsProvider(
+  new RateLimitedSanctionsProvider(rest),
+  { failureThreshold: 5, cooldownMs: 30_000, name: 'rest' },
+);
+provider.renderPrometheus(); // provider_circuit_state{provider="rest"} 0|1|2 (closed|half-open|open)
+```
+
+## Pluggable signer (KMS/HSM)
+
+`createRpcDenylistWriter` accepts any `Signer` (`{ publicKey(): string; sign(txHash: Buffer): Promise<Buffer> }`) via `signer` or `sourceKeypair`. Passing a `Keypair` keeps working unchanged (it is wrapped in `KeypairSigner`).
+
+Example AWS KMS signer (Ed25519 key, `@aws-sdk/client-kms`):
+
+```ts
+import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
+import type { Signer } from 'sanctions-oracle';
+
+const kms = new KMSClient({});
+const kmsSigner: Signer = {
+  publicKey: () => process.env.ORACLE_PUBLIC_KEY!, // G... address of the KMS key
+  async sign(txHash) {
+    const { Signature } = await kms.send(
+      new SignCommand({
+        KeyId: process.env.ORACLE_KMS_KEY_ID!,
+        Message: txHash,
+        MessageType: 'RAW',
+        SigningAlgorithm: 'ED25519_SHA_512',
+      }),
+    );
+    return Buffer.from(Signature!);
+  },
+};
+
+const writer = createRpcDenylistWriter({ rpcUrl, networkPassphrase, contractId, signer: kmsSigner });
+```
+
+## Fee-bump transactions
+
+Set `feeSource` (a `Keypair` or `Signer`) on the writer, or `SANCTIONS_ORACLE_FEE_SOURCE_SECRET_KEY` for the CLI, and each transaction is wrapped in a `FeeBumpTransaction` paid by that account. The oracle key then only authorizes the call and needs no XLM for fees. Dry-run never builds or submits transactions.
+
+## Max duration
+
+`SyncOptions.maxDurationMs` / `--max-duration <ms>` sets a hard deadline. When it elapses no new checks start, in-flight checks finish, flagged addresses are written and checkpointed, and the result reports `deadlineExceeded: true` plus `unprocessed`. The CLI then exits with code **3** (`EXIT_CODE_DEADLINE_EXCEEDED`).

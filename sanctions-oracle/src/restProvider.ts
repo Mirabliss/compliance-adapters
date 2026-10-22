@@ -34,6 +34,7 @@
 
 import type { SanctionsProvider } from './SanctionsProvider';
 import { normalizeStellarAddress } from '@compliance-adapters/shared';
+import { NoopTracer, type AnyTracer, type TracingContext } from './tracing';
 
 /** Shape returned by the hypothetical watchlist REST API. */
 interface SanctionsApiResponse {
@@ -57,6 +58,12 @@ export interface RestSanctionsProviderOptions {
    * Override in tests to avoid real network I/O.
    */
   fetchImpl?: typeof fetch;
+  /** Optional tracer; spans named `watchlist_check` when provided. */
+  tracer?: AnyTracer;
+  /** Parent context for the outbound check span. */
+  parentContext?: TracingContext;
+  /** When `false`, no `traceparent` header is sent. Defaults to `true`. */
+  propagateTraceContext?: boolean;
 }
 
 /**
@@ -70,6 +77,9 @@ export class RestSanctionsProvider implements SanctionsProvider {
   private readonly apiKey: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly tracer: AnyTracer;
+  private readonly parentContext: TracingContext | undefined;
+  private readonly propagateTraceContext: boolean;
 
   constructor(options: RestSanctionsProviderOptions) {
     this.apiBaseUrl = options.apiBaseUrl.replace(/\/$/, ''); // strip trailing slash
@@ -78,6 +88,9 @@ export class RestSanctionsProvider implements SanctionsProvider {
     // Node 20+ ships a global fetch; fetchImpl is injectable so tests never
     // make a real network call.
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.tracer = options.tracer ?? new NoopTracer();
+    this.parentContext = options.parentContext;
+    this.propagateTraceContext = options.propagateTraceContext !== false;
   }
 
   async checkAddress(rawAddress: string): Promise<{ flagged: boolean; source: string }> {
@@ -85,6 +98,17 @@ export class RestSanctionsProvider implements SanctionsProvider {
     // input cannot miss a match.
     const address = normalizeStellarAddress(rawAddress);
     const url = `${this.apiBaseUrl}/check?address=${encodeURIComponent(address)}`;
+    const span = this.tracer.startSpan('watchlist_check', this.parentContext);
+    span.setAttribute('address', address.slice(0, 8));
+
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.apiKey}` };
+    // Inject W3C traceparent so the watchlist API can continue the trace.
+    if (this.propagateTraceContext && span.traceId) {
+      headers['traceparent'] = this.tracer.injectContext({
+        traceId: span.traceId,
+        spanId: span.spanId,
+      });
+    }
 
     // AbortController-based timeout — the `timeout` property on RequestInit is
     // not part of the Fetch specification and is silently ignored by Node's
@@ -95,10 +119,11 @@ export class RestSanctionsProvider implements SanctionsProvider {
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
-        headers: { Authorization: `Bearer ${this.apiKey}` },
+        headers,
         signal: controller.signal,
       });
     } catch (error) {
+      span.end('error', error instanceof Error ? error : new Error(String(error)));
       const isTimeout =
         error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
       const message = isTimeout
@@ -110,12 +135,14 @@ export class RestSanctionsProvider implements SanctionsProvider {
     }
 
     if (!response.ok) {
+      span.end('error', new Error(`HTTP ${response.status}`));
       throw new Error(
         `Watchlist API returned HTTP ${response.status} for address ${address}`,
       );
     }
 
     const data = (await response.json()) as SanctionsApiResponse;
+    span.end('ok');
 
     return {
       flagged: data.is_flagged,

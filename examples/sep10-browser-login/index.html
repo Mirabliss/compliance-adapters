@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SEP-10 Browser Login — Freighter Demo</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>SEP-10 Browser Login</h1>
+      <p class="subtitle">
+        Authenticate your Stellar address using the
+        <a href="https://stellar.org/protocol/sep-10" target="_blank" rel="noopener">SEP-10</a>
+        web-auth protocol and the
+        <a href="https://www.freighter.app/" target="_blank" rel="noopener">Freighter</a> browser
+        wallet.
+      </p>
+
+      <!-- ── Step indicators ────────────────────────────────────────────── -->
+      <ol class="steps" aria-label="Authentication steps">
+        <li id="step-connect" class="step">
+          <span class="step-num">1</span>
+          <span class="step-label">Connect Freighter</span>
+        </li>
+        <li id="step-challenge" class="step">
+          <span class="step-num">2</span>
+          <span class="step-label">Fetch challenge</span>
+        </li>
+        <li id="step-sign" class="step">
+          <span class="step-num">3</span>
+          <span class="step-label">Sign with Freighter</span>
+        </li>
+        <li id="step-token" class="step">
+          <span class="step-num">4</span>
+          <span class="step-label">Receive token</span>
+        </li>
+      </ol>
+
+      <!-- ── Action area ────────────────────────────────────────────────── -->
+      <section class="action-area" aria-live="polite">
+        <div id="status" class="status status--idle" role="status">
+          Click <strong>Connect Freighter</strong> to begin.
+        </div>
+
+        <button id="btn-connect" type="button" class="btn btn--primary">
+          Connect Freighter
+        </button>
+        <button id="btn-login" type="button" class="btn btn--primary" hidden>
+          Login with SEP-10
+        </button>
+        <button id="btn-logout" type="button" class="btn btn--secondary" hidden>
+          Logout
+        </button>
+      </section>
+
+      <!-- ── Result panel ───────────────────────────────────────────────── -->
+      <section id="result-panel" class="result-panel" hidden aria-label="Authentication result">
+        <h2>Authenticated ✓</h2>
+        <dl class="result-list">
+          <dt>Stellar address</dt>
+          <dd id="result-address" class="mono"></dd>
+
+          <dt>Network</dt>
+          <dd id="result-network"></dd>
+
+          <dt>JWT token <small>(stored in sessionStorage)</small></dt>
+          <dd id="result-token" class="mono token-preview"></dd>
+        </dl>
+      </section>
+
+      <!-- ── Debug log ──────────────────────────────────────────────────── -->
+      <details class="log-details">
+        <summary>Debug log</summary>
+        <pre id="log" class="log" aria-label="Debug log"></pre>
+      </details>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
