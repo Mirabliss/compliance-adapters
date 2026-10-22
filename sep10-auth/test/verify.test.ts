@@ -17,7 +17,7 @@ function signAsClient(
 }
 
 describe('verifyChallenge', () => {
-  it('matches expectedMemo against an id memo and rejects a mismatch', () => {
+  it('matches expectedMemo against an id memo and rejects a mismatch', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const challenge = generateChallenge(clientKeypair.publicKey(), serverKeypair, {
@@ -32,11 +32,11 @@ describe('verifyChallenge', () => {
       webAuthDomain: homeDomain,
     };
 
-    expect(verifyChallenge(signedXDR, { ...base, expectedMemo: '123456789' }).valid).toBe(true);
-    expect(verifyChallenge(signedXDR, { ...base, expectedMemo: '999' }).valid).toBe(false);
+    expect((await verifyChallenge(signedXDR, { ...base, expectedMemo: '123456789' })).valid).toBe(true);
+    expect((await verifyChallenge(signedXDR, { ...base, expectedMemo: '999' })).valid).toBe(false);
   });
 
-  it('accepts a challenge signed by the client', () => {
+  it('accepts a challenge signed by the client', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -48,7 +48,7 @@ describe('verifyChallenge', () => {
 
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: homeDomain,
@@ -61,7 +61,7 @@ describe('verifyChallenge', () => {
     expect(result.errorCode).toBeUndefined();
   });
 
-  it('accepts a challenge when homeDomains is an array containing the challenge home domain', () => {
+  it('accepts a challenge when homeDomains is an array containing the challenge home domain', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -73,7 +73,7 @@ describe('verifyChallenge', () => {
 
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: ['domain-a.com', 'domain-b.com'],
@@ -86,7 +86,7 @@ describe('verifyChallenge', () => {
     expect(result.errorCode).toBeUndefined();
   });
 
-  it('rejects a challenge whose timebounds have expired', () => {
+  it('rejects a challenge whose timebounds have expired', async () => {
     // buildChallengeTx always sets minTime to the real "now" at build time, so
     // an already-expired transaction can't be constructed with a negative
     // timeout (minTime would end up after maxTime and the SDK rejects that
@@ -111,7 +111,7 @@ describe('verifyChallenge', () => {
 
       jest.advanceTimersByTime((1 + 301) * 1000);
 
-      const result = verifyChallenge(signedXDR, {
+      const result = await verifyChallenge(signedXDR, {
         serverAccountId: serverKeypair.publicKey(),
         networkPassphrase: Networks.TESTNET,
         homeDomains: homeDomain,
@@ -126,7 +126,7 @@ describe('verifyChallenge', () => {
     }
   });
 
-  it('treats the exact boundary instant (maxTime + 300s) as valid (inclusive), and expires immediately after', () => {
+  it('treats the exact boundary instant (maxTime + 300s) as valid (inclusive), and expires immediately after', async () => {
     jest.useFakeTimers();
     try {
       const initialTime = 1700000000000;
@@ -149,7 +149,7 @@ describe('verifyChallenge', () => {
       // Stellar SDK's WebAuth.readChallengeTx treats the boundary instant as inclusive (valid).
       jest.advanceTimersByTime((timeoutSeconds + 300) * 1000);
 
-      const resultAtBoundary = verifyChallenge(signedXDR, {
+      const resultAtBoundary = await verifyChallenge(signedXDR, {
         serverAccountId: serverKeypair.publicKey(),
         networkPassphrase: Networks.TESTNET,
         homeDomains: homeDomain,
@@ -164,7 +164,7 @@ describe('verifyChallenge', () => {
       // Advancing 1 second past the boundary (601s total elapsed) causes the challenge to be expired.
       jest.advanceTimersByTime(1000);
 
-      const resultAfterBoundary = verifyChallenge(signedXDR, {
+      const resultAfterBoundary = await verifyChallenge(signedXDR, {
         serverAccountId: serverKeypair.publicKey(),
         networkPassphrase: Networks.TESTNET,
         homeDomains: homeDomain,
@@ -179,7 +179,7 @@ describe('verifyChallenge', () => {
     }
   });
 
-  it('rejects a challenge verified against the wrong network passphrase', () => {
+  it('rejects a challenge verified against the wrong network passphrase', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -191,7 +191,7 @@ describe('verifyChallenge', () => {
 
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.PUBLIC,
       homeDomains: homeDomain,
@@ -204,7 +204,7 @@ describe('verifyChallenge', () => {
     expect(result.error).toMatch(/network|passphrase|hash|signed|server/i);
   });
 
-  it('rejects a challenge the client never signed', () => {
+  it('rejects a challenge the client never signed', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -214,7 +214,7 @@ describe('verifyChallenge', () => {
       networkPassphrase: Networks.TESTNET,
     });
 
-    const result = verifyChallenge(challenge.transactionXDR, {
+    const result = await verifyChallenge(challenge.transactionXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: homeDomain,
@@ -226,7 +226,7 @@ describe('verifyChallenge', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('accumulates error messages from all webAuthDomain attempts when all fail (issue #304)', () => {
+  it('accumulates error messages from all webAuthDomain attempts when all fail (issue #304)', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -239,7 +239,7 @@ describe('verifyChallenge', () => {
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
     // Try to verify with multiple wrong webAuthDomains
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: 'correct-domain.com',
@@ -253,7 +253,7 @@ describe('verifyChallenge', () => {
     // Currently it only reports the last error, which is the issue #304 documents
   });
 
-  it('reports mismatch error when challenge has one webAuthDomain but verification tries different ones', () => {
+  it('reports mismatch error when challenge has one webAuthDomain but verification tries different ones', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -266,7 +266,7 @@ describe('verifyChallenge', () => {
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
     // Try with array of different domains
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: 'domain-a.com',
@@ -284,7 +284,7 @@ describe('verifyChallenge', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('verifyChallenge — typed error codes (#37)', () => {
-  it('returns no errorCode on success', () => {
+  it('returns no errorCode on success', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const challenge = generateChallenge(clientKeypair.publicKey(), serverKeypair, {
@@ -294,7 +294,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     });
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: homeDomain,
@@ -305,8 +305,8 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     expect(result.errorCode).toBeUndefined();
   });
 
-  it('returns INVALID_SERVER_ACCOUNT_ID for a bad serverAccountId', () => {
-    const result = verifyChallenge('some-xdr', {
+  it('returns INVALID_SERVER_ACCOUNT_ID for a bad serverAccountId', async () => {
+    const result = await verifyChallenge('some-xdr', {
       serverAccountId: 'not-a-valid-key',
       homeDomains: homeDomain,
       webAuthDomain: homeDomain,
@@ -317,9 +317,9 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     expect(result.error).toMatch(/serverAccountId/i);
   });
 
-  it('returns INVALID_OPTIONS for a non-bare homeDomain', () => {
+  it('returns INVALID_OPTIONS for a non-bare homeDomain', async () => {
     const serverKeypair = Keypair.random();
-    const result = verifyChallenge('some-xdr', {
+    const result = await verifyChallenge('some-xdr', {
       serverAccountId: serverKeypair.publicKey(),
       homeDomains: 'https://example.com',
       webAuthDomain: homeDomain,
@@ -329,9 +329,9 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     expect(result.errorCode).toBe<VerifyErrorCode>('INVALID_OPTIONS');
   });
 
-  it('returns INVALID_OPTIONS for a non-bare webAuthDomain', () => {
+  it('returns INVALID_OPTIONS for a non-bare webAuthDomain', async () => {
     const serverKeypair = Keypair.random();
-    const result = verifyChallenge('some-xdr', {
+    const result = await verifyChallenge('some-xdr', {
       serverAccountId: serverKeypair.publicKey(),
       homeDomains: homeDomain,
       webAuthDomain: 'http://bad-domain.com/path',
@@ -341,7 +341,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     expect(result.errorCode).toBe<VerifyErrorCode>('INVALID_OPTIONS');
   });
 
-  it('returns CHALLENGE_EXPIRED for an expired challenge', () => {
+  it('returns CHALLENGE_EXPIRED for an expired challenge', async () => {
     jest.useFakeTimers();
     try {
       const serverKeypair = Keypair.random();
@@ -355,7 +355,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
       const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
       jest.advanceTimersByTime((1 + 301) * 1000);
 
-      const result = verifyChallenge(signedXDR, {
+      const result = await verifyChallenge(signedXDR, {
         serverAccountId: serverKeypair.publicKey(),
         networkPassphrase: Networks.TESTNET,
         homeDomains: homeDomain,
@@ -369,7 +369,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     }
   });
 
-  it('returns WRONG_SIGNER when the client never signed', () => {
+  it('returns WRONG_SIGNER when the client never signed', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const challenge = generateChallenge(clientKeypair.publicKey(), serverKeypair, {
@@ -379,7 +379,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     });
 
     // Pass the unsigned challenge (only server-signed)
-    const result = verifyChallenge(challenge.transactionXDR, {
+    const result = await verifyChallenge(challenge.transactionXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: homeDomain,
@@ -392,7 +392,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     expect(['WRONG_SIGNER', 'INVALID_CHALLENGE']).toContain(result.errorCode);
   });
 
-  it('returns WRONG_DOMAIN when all webAuthDomain candidates fail', () => {
+  it('returns WRONG_DOMAIN when all webAuthDomain candidates fail', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const challenge = generateChallenge(clientKeypair.publicKey(), serverKeypair, {
@@ -402,7 +402,7 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     });
     const signedXDR = signAsClient(challenge.transactionXDR, Networks.TESTNET, clientKeypair);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: Networks.TESTNET,
       homeDomains: homeDomain,
@@ -413,17 +413,17 @@ describe('verifyChallenge — typed error codes (#37)', () => {
     expect(result.errorCode).toBe<VerifyErrorCode>('WRONG_DOMAIN');
   });
 
-  it('returns a defined errorCode whenever valid is false', () => {
+  it('returns a defined errorCode whenever valid is false', async () => {
     // Property: every failure result must carry an errorCode
     const serverKeypair = Keypair.random();
-    const failureCases = [
+    const failureCases = await Promise.all([
       // invalid serverAccountId
       verifyChallenge('garbage', { serverAccountId: 'bad', homeDomains: homeDomain, webAuthDomain: homeDomain }),
       // invalid domain format
       verifyChallenge('garbage', { serverAccountId: serverKeypair.publicKey(), homeDomains: 'https://bad.com', webAuthDomain: homeDomain }),
       // garbage XDR
       verifyChallenge('notbase64atall!!!', { serverAccountId: serverKeypair.publicKey(), homeDomains: homeDomain, webAuthDomain: homeDomain }),
-    ];
+    ]);
 
     for (const result of failureCases) {
       expect(result.valid).toBe(false);
@@ -458,48 +458,48 @@ describe('verifyChallenge — expectedMemo (#40)', () => {
     webAuthDomain: homeDomain,
   };
 
-  it('succeeds when expectedMemo matches the transaction memo', () => {
+  it('succeeds when expectedMemo matches the transaction memo', async () => {
     const signedXDR = buildSigned('42');
-    const result = verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '42' });
+    const result = await verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '42' });
     expect(result.valid).toBe(true);
     expect(result.errorCode).toBeUndefined();
   });
 
-  it('fails with MEMO_MISMATCH when expectedMemo does not match transaction memo', () => {
+  it('fails with MEMO_MISMATCH when expectedMemo does not match transaction memo', async () => {
     const signedXDR = buildSigned('42');
-    const result = verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '999' });
+    const result = await verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '999' });
     expect(result.valid).toBe(false);
     expect(result.errorCode).toBe<VerifyErrorCode>('MEMO_MISMATCH');
     expect(result.error).toMatch(/memo mismatch/i);
     expect(result.error).toContain('999');
   });
 
-  it('fails with MEMO_MISMATCH when expectedMemo is provided but transaction has no memo', () => {
+  it('fails with MEMO_MISMATCH when expectedMemo is provided but transaction has no memo', async () => {
     const signedXDR = buildSigned(undefined); // no memo on challenge
-    const result = verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '42' });
+    const result = await verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '42' });
     expect(result.valid).toBe(false);
     expect(result.errorCode).toBe<VerifyErrorCode>('MEMO_MISMATCH');
     expect(result.error).toMatch(/memo mismatch/i);
   });
 
-  it('succeeds without checking memo when expectedMemo is not provided', () => {
+  it('succeeds without checking memo when expectedMemo is not provided', async () => {
     const signedXDR = buildSigned('99');
     // No expectedMemo — existing behaviour must be unchanged
-    const result = verifyChallenge(signedXDR, baseOpts);
+    const result = await verifyChallenge(signedXDR, baseOpts);
     expect(result.valid).toBe(true);
     expect(result.errorCode).toBeUndefined();
   });
 
-  it('succeeds without checking memo when challenge has no memo and expectedMemo is absent', () => {
+  it('succeeds without checking memo when challenge has no memo and expectedMemo is absent', async () => {
     const signedXDR = buildSigned(undefined);
-    const result = verifyChallenge(signedXDR, baseOpts);
+    const result = await verifyChallenge(signedXDR, baseOpts);
     expect(result.valid).toBe(true);
     expect(result.errorCode).toBeUndefined();
   });
 
-  it('preserves human-readable error message on MEMO_MISMATCH', () => {
+  it('preserves human-readable error message on MEMO_MISMATCH', async () => {
     const signedXDR = buildSigned('100');
-    const result = verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '200' });
+    const result = await verifyChallenge(signedXDR, { ...baseOpts, expectedMemo: '200' });
     expect(result.valid).toBe(false);
     expect(result.error).toContain('"200"');
   });
@@ -548,7 +548,7 @@ describe('verifyChallenge - first operation source must be the client', () => {
       webAuthDomain: homeDomain,
     });
 
-  it('rejects a challenge whose first operation source is the server', () => {
+  it('rejects a challenge whose first operation source is the server', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const xdr = buildChallengeWithFirstOpSource(
@@ -557,13 +557,13 @@ describe('verifyChallenge - first operation source must be the client', () => {
       serverKeypair.publicKey(),
     );
 
-    const result = verifyFor(serverKeypair, xdr);
+    const result = await verifyFor(serverKeypair, xdr);
 
     expect(result.valid).toBe(false);
     expect(result.address).toBe('');
   });
 
-  it('rejects a challenge whose first operation source is a third-party key', () => {
+  it('rejects a challenge whose first operation source is a third-party key', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const xdr = buildChallengeWithFirstOpSource(
@@ -572,7 +572,7 @@ describe('verifyChallenge - first operation source must be the client', () => {
       Keypair.random().publicKey(),
     );
 
-    const result = verifyFor(serverKeypair, xdr);
+    const result = await verifyFor(serverKeypair, xdr);
 
     expect(result.valid).toBe(false);
     expect(result.address).toBe('');

@@ -118,7 +118,7 @@ address.
 ```ts
 import { verifyChallenge } from 'sep10-auth';
 
-const result = verifyChallenge(signedXDR, {
+const result = await verifyChallenge(signedXDR, {
   serverAccountId: serverKeypair.publicKey(),
   homeDomains: 'example.com',
   webAuthDomain: 'auth.example.com',
@@ -145,7 +145,7 @@ timebound. Set `clockSkewToleranceSec` to widen that window symmetrically
 clocks drift further apart:
 
 ```ts
-verifyChallenge(signedXDR, {
+await verifyChallenge(signedXDR, {
   serverAccountId: serverKeypair.publicKey(),
   homeDomains: 'example.com',
   webAuthDomain: 'auth.example.com',
