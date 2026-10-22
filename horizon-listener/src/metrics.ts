@@ -27,9 +27,9 @@ import {
 export { DEFAULT_HISTOGRAM_BUCKETS };
 export type { Counter, Histogram, Outcome };
 
-export type Phase = 'rpc_poll' | 'event_relay' | 'webhook';
+export type Phase = 'rpc_poll' | 'event_relay' | 'webhook' | 'rpc_failover';
 
-const PHASES: Phase[] = ['rpc_poll', 'event_relay', 'webhook'];
+const PHASES: Phase[] = ['rpc_poll', 'event_relay', 'webhook', 'rpc_failover'];
 
 export type MetricsRegistryOptions = Omit<
   GenericMetricsRegistryOptions<Phase>,

@@ -3,9 +3,11 @@
  * SPDX-License-Identifier: MIT
  */
 
-export { HorizonListener, type HorizonListenerOptions, type Logger } from './listener';
+export { HorizonListener, type HorizonListenerOptions, type StartOptions, type Logger } from './listener';
 export {
   RpcEventSource,
+  CursorOutOfRangeError,
+  toCursorOutOfRangeError,
   type EventSource,
   type RawContractEvent,
   type RpcEventSourceOptions,

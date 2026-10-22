@@ -440,3 +440,34 @@ operator environment.
 - [`compliance-primitives`](https://github.com/stellar-compliance-kit/compliance-primitives) —
   the on-chain `denylist-gate` and `allowlist-token` Soroban contracts this
   package listens to events from.
+
+## Lifecycle, streaming, and resilience
+
+```ts
+// AbortSignal: abort behaves like stop(); start() resolves once wound down.
+const controller = new AbortController();
+const done = listener.start({ signal: controller.signal });
+controller.abort();
+await done;
+
+// Async iterator: cursor advances only as you pull; break/abort stops the listener.
+for await (const event of listener.events({ signal })) {
+  await handle(event);
+}
+
+// RPC failover: rotate after 3 consecutive failures, retry primary after 60s.
+new RpcEventSource({
+  rpcUrls: ['https://rpc-a.example', 'https://rpc-b.example'],
+  failoverAfter: 3,
+  primaryCooldownMs: 60_000,
+  metrics, // increments the `rpc_failover` counter
+  networkPassphrase,
+  contractIds,
+  startLedger,
+});
+
+// Retention-window gaps: a pruned cursor raises CursorOutOfRangeError
+// { requested, oldestAvailable }. Default `onGap: 'fail'` stops the listener;
+// `onGap: 'skipToOldest'` logs the gap size and resumes from the oldest ledger.
+new HorizonListener({ eventSource, onEvent, onGap: 'skipToOldest' });
+```
