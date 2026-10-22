@@ -77,6 +77,55 @@ export interface HttpWebhookSenderOptions {
   tracer?: AnyTracer;
   /** Parent context for outbound webhook spans. */
   parentContext?: TracingContext;
+  /**
+   * Static headers sent with every request (e.g. an API-gateway key or tenant
+   * id). Reserved headers (`Content-Type`, `X-Signature`, `X-Timestamp`,
+   * `traceparent`) always win and cannot be overridden.
+   */
+  headers?: Record<string, string>;
+  /**
+   * Client certificate material for mutual TLS. When set, an undici `Agent`
+   * is created and used as the fetch dispatcher. Requires the `undici`
+   * package to be installed. Ignored when `dispatcher` is passed.
+   */
+  tls?: { cert?: string | Buffer; key?: string | Buffer; ca?: string | Buffer | Array<string | Buffer> };
+  /** Custom undici dispatcher passed through to fetch (e.g. a pre-configured mTLS Agent). */
+  dispatcher?: unknown;
+}
+
+/** Maximum number of response-body characters included in error messages. */
+export const MAX_ERROR_BODY_CHARS = 2048;
+
+const RESERVED_HEADERS = new Set(['content-type', 'x-signature', 'x-timestamp', 'traceparent']);
+
+// Reads at most MAX_ERROR_BODY_CHARS of the body, strips control characters
+// and appends a marker when truncated, so large HTML error pages don't flood
+// logs or leak data.
+async function readErrorBody(response: Response): Promise<string> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return '';
+  }
+  // eslint-disable-next-line no-control-regex
+  const clean = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim();
+  return clean.length > MAX_ERROR_BODY_CHARS
+    ? `${clean.slice(0, MAX_ERROR_BODY_CHARS)}…[truncated ${clean.length - MAX_ERROR_BODY_CHARS} chars]`
+    : clean;
+}
+
+function createTlsDispatcher(tls: NonNullable<HttpWebhookSenderOptions['tls']>): unknown {
+  let undici: { Agent: new (opts: unknown) => unknown };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    undici = require('undici');
+  } catch {
+    throw new Error(
+      'horizon-listener: HttpWebhookSender `tls` option requires the "undici" package; install it or pass a `dispatcher`',
+    );
+  }
+  return new undici.Agent({ connect: { cert: tls.cert, key: tls.key, ca: tls.ca } });
 }
 
 export class HttpWebhookSender implements WebhookSender {
@@ -88,6 +137,8 @@ export class HttpWebhookSender implements WebhookSender {
   private readonly metrics: AnyMetricsRegistry;
   private readonly tracer: AnyTracer;
   private readonly parentContext: TracingContext | undefined;
+  private readonly customHeaders: Record<string, string>;
+  private readonly dispatcher: unknown;
 
   constructor(options: HttpWebhookSenderOptions) {
     // Validate URL is syntactically valid and has a protocol (http/https)
@@ -118,6 +169,10 @@ export class HttpWebhookSender implements WebhookSender {
     this.metrics = options.metrics ?? new NoopMetricsRegistry();
     this.tracer = options.tracer ?? new NoopTracer();
     this.parentContext = options.parentContext;
+    this.customHeaders = Object.fromEntries(
+      Object.entries(options.headers ?? {}).filter(([k]) => !RESERVED_HEADERS.has(k.toLowerCase())),
+    );
+    this.dispatcher = options.dispatcher ?? (options.tls ? createTlsDispatcher(options.tls) : undefined);
   }
 
   /**
@@ -127,7 +182,10 @@ export class HttpWebhookSender implements WebhookSender {
    */
   async send(event: RawContractEvent): Promise<void> {
     const body = JSON.stringify({ event });
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {
+      ...this.customHeaders,
+      'Content-Type': 'application/json',
+    };
 
     if (this.signingSecret) {
       const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -174,13 +232,16 @@ export class HttpWebhookSender implements WebhookSender {
             headers,
             body,
             signal: controller?.signal,
-          });
+            ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
+          } as RequestInit);
 
           const durationMs = Date.now() - start;
 
           if (!response.ok) {
+            const errorBody = await readErrorBody(response);
             throw new WebhookHttpError(
-              `horizon-listener: webhook POST to ${this.url} failed with status ${response.status}`,
+              `horizon-listener: webhook POST to ${this.url} failed with status ${response.status}` +
+                (errorBody ? `: ${errorBody}` : ''),
               response.status,
             );
           }

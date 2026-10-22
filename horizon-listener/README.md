@@ -441,33 +441,30 @@ operator environment.
   the on-chain `denylist-gate` and `allowlist-token` Soroban contracts this
   package listens to events from.
 
-## Lifecycle, streaming, and resilience
+## Concurrent event processing
 
 ```ts
-// AbortSignal: abort behaves like stop(); start() resolves once wound down.
-const controller = new AbortController();
-const done = listener.start({ signal: controller.signal });
-controller.abort();
-await done;
-
-// Async iterator: cursor advances only as you pull; break/abort stops the listener.
-for await (const event of listener.events({ signal })) {
-  await handle(event);
-}
-
-// RPC failover: rotate after 3 consecutive failures, retry primary after 60s.
-new RpcEventSource({
-  rpcUrls: ['https://rpc-a.example', 'https://rpc-b.example'],
-  failoverAfter: 3,
-  primaryCooldownMs: 60_000,
-  metrics, // increments the `rpc_failover` counter
-  networkPassphrase,
-  contractIds,
-  startLedger,
-});
-
-// Retention-window gaps: a pruned cursor raises CursorOutOfRangeError
-// { requested, oldestAvailable }. Default `onGap: 'fail'` stops the listener;
-// `onGap: 'skipToOldest'` logs the gap size and resumes from the oldest ledger.
-new HorizonListener({ eventSource, onEvent, onGap: 'skipToOldest' });
+new HorizonListener({ eventSource, onEvent, concurrency: 8, orderingKey: 'contract' });
 ```
+
+Events from different contracts run in parallel (up to `concurrency`); events from the same contract stay in order. The cursor advances only after the whole page is processed, and the next page isn't fetched until then (backpressure). Use `orderingKey: 'none'` to drop ordering entirely.
+
+## Webhook custom headers, mTLS and error bodies
+
+```ts
+import { readFileSync } from 'node:fs';
+
+new HttpWebhookSender({
+  url: 'https://receiver.example.com/hook',
+  headers: { 'X-Api-Key': process.env.API_KEY!, 'X-Tenant-Id': 'acme' },
+  tls: {
+    cert: readFileSync('client.crt'),
+    key: readFileSync('client.key'),
+    ca: readFileSync('ca.crt'),
+  },
+});
+```
+
+- `headers` are merged under the reserved `Content-Type`, `X-Signature`, `X-Timestamp` and `traceparent` headers, which can't be overridden.
+- `tls` requires the `undici` package (`npm i undici`); alternatively pass your own `dispatcher`.
+- Non-2xx response bodies are included in `WebhookHttpError` messages, capped at 2 KB with control characters stripped and a `…[truncated N chars]` marker.
