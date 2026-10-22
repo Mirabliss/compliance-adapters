@@ -12,6 +12,7 @@
  * Commands:
  *   sync-sanctions   Push flagged addresses into a deployed denylist-gate contract
  *   listen           Poll Soroban RPC for contract events and forward to a webhook
+ *   dlq              Inspect and replay the dead-letter queue
  *
  * Run `compliance-adapters <command> --help` for command-specific flags.
  */
@@ -19,6 +20,7 @@
 const COMMANDS = {
   'sync-sanctions': runSyncSanctions,
   listen: runListen,
+  dlq: runDlq,
 };
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,7 @@ compliance-adapters <command> [options]
 Commands:
   sync-sanctions   Push flagged addresses into a deployed denylist-gate contract
   listen           Poll Soroban RPC for contract events and forward to a webhook
+  dlq              Inspect and replay the dead-letter queue (try: dlq replay --help)
 
 Options:
   --help, -h       Show this help message
@@ -282,6 +285,107 @@ Examples:
 
   await listener.start();
   console.info('[listen] Listener stopped.');
+}
+
+// ---------------------------------------------------------------------------
+// dlq command (#821): replay events from the dead-letter queue
+// ---------------------------------------------------------------------------
+
+/**
+ * Usage:
+ *   compliance-adapters dlq replay --dlq <path> --webhook <url> [--dry-run] [--limit N]
+ */
+async function runDlq(argv) {
+  const [subcommand, ...subRest] = argv;
+  if (subcommand !== 'replay' || subRest.includes('--help') || subRest.includes('-h')) {
+    console.log(`
+compliance-adapters dlq replay [options]
+
+Replay events from the dead-letter queue via the webhook.
+
+Options:
+  --dlq <path>      Path to the File DLQ (JSON-lines file) (required)
+  --webhook <url>   Webhook endpoint to POST events to (required unless --dry-run)
+  --dry-run         Count what would be replayed without sending or removing entries
+  --limit <n>       Maximum entries to attempt, oldest first (default: all)
+  --help            Show this help message
+`.trim());
+    if (subcommand !== 'replay') {
+      console.error('\nUnknown dlq subcommand: expected "replay"');
+      process.exitCode = 1;
+    }
+    return;
+  }
+
+  const args = parseFlags(subRest);
+  const dlqPath = typeof args['dlq'] === 'string' ? args['dlq'] : null;
+  const webhookUrl = typeof args['webhook'] === 'string' ? args['webhook'] : null;
+  const dryRun = args['dry-run'] === true;
+  const limit = args['limit'] !== undefined ? parseInt(args['limit'], 10) : undefined;
+
+  if (!dlqPath) {
+    console.error('Missing required flag: --dlq <path-to-dlq-file>');
+    process.exitCode = 1;
+    return;
+  }
+  if (!webhookUrl && !dryRun) {
+    console.error('Missing required flag: --webhook <url> (or pass --dry-run)');
+    process.exitCode = 1;
+    return;
+  }
+  if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+    console.error('Invalid flag: --limit must be a positive integer');
+    process.exitCode = 1;
+    return;
+  }
+
+  // Prefer the built package; fall back to a minimal JSON-lines reader so the
+  // CLI works even before `npm run build` has been run.
+  let FileDeadLetterQueue;
+  let replayDeadLetterQueue;
+  try {
+    ({ FileDeadLetterQueue, replayDeadLetterQueue } = require('../horizon-listener/dist/index.js'));
+  } catch {
+    const fs = require('fs');
+    FileDeadLetterQueue = class {
+      constructor(p) {
+        this.filePath = p;
+        this.entries = fs.existsSync(p)
+          ? fs.readFileSync(p, 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l))
+          : [];
+      }
+      getAll() { return [...this.entries]; }
+      async remove(id) {
+        const i = this.entries.findIndex((e) => e.event.id === id);
+        if (i === -1) return false;
+        this.entries.splice(i, 1);
+        fs.writeFileSync(this.filePath, this.entries.map((e) => JSON.stringify(e) + '\n').join(''));
+        return true;
+      }
+    };
+    replayDeadLetterQueue = async ({ queue, send, dryRun: dr, limit: lim }) => {
+      const entries = queue.getAll().slice(0, lim ?? Number.MAX_SAFE_INTEGER);
+      let delivered = 0, failed = 0;
+      for (const entry of entries) {
+        try { await send(entry.event); delivered++; if (!dr) await queue.remove(entry.event.id); }
+        catch { failed++; }
+      }
+      return { delivered, failed, attempted: entries.length };
+    };
+  }
+
+  const queue = new FileDeadLetterQueue(dlqPath);
+  const send = async (event) => {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event }),
+    });
+    if (!res.ok) throw new Error(`webhook POST failed with status ${res.status}`);
+  };
+
+  const result = await replayDeadLetterQueue({ queue, send: dryRun ? async () => {} : send, dryRun, limit });
+  console.log(JSON.stringify({ dlq: dlqPath, dryRun, ...result }));
 }
 
 // ---------------------------------------------------------------------------

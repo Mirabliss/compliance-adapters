@@ -733,3 +733,52 @@ flagged address using `@stellar/stellar-sdk`'s `Contract`,
 - Root repo [README](../README.md)
 - [compliance-primitives](https://github.com/stellar-compliance-kit/compliance-primitives) —
   the Soroban contracts (including `denylist-gate`) this package talks to.
+
+## Circuit breaker
+
+Wrap any provider with `CircuitBreakerSanctionsProvider` so a dead upstream fails fast instead of every address waiting out the full retry cycle. It composes with `RateLimitedSanctionsProvider` and `ProviderRegistry`.
+
+```ts
+const provider = new CircuitBreakerSanctionsProvider(
+  new RateLimitedSanctionsProvider(rest),
+  { failureThreshold: 5, cooldownMs: 30_000, name: 'rest' },
+);
+provider.renderPrometheus(); // provider_circuit_state{provider="rest"} 0|1|2 (closed|half-open|open)
+```
+
+## Pluggable signer (KMS/HSM)
+
+`createRpcDenylistWriter` accepts any `Signer` (`{ publicKey(): string; sign(txHash: Buffer): Promise<Buffer> }`) via `signer` or `sourceKeypair`. Passing a `Keypair` keeps working unchanged (it is wrapped in `KeypairSigner`).
+
+Example AWS KMS signer (Ed25519 key, `@aws-sdk/client-kms`):
+
+```ts
+import { KMSClient, SignCommand } from '@aws-sdk/client-kms';
+import type { Signer } from 'sanctions-oracle';
+
+const kms = new KMSClient({});
+const kmsSigner: Signer = {
+  publicKey: () => process.env.ORACLE_PUBLIC_KEY!, // G... address of the KMS key
+  async sign(txHash) {
+    const { Signature } = await kms.send(
+      new SignCommand({
+        KeyId: process.env.ORACLE_KMS_KEY_ID!,
+        Message: txHash,
+        MessageType: 'RAW',
+        SigningAlgorithm: 'ED25519_SHA_512',
+      }),
+    );
+    return Buffer.from(Signature!);
+  },
+};
+
+const writer = createRpcDenylistWriter({ rpcUrl, networkPassphrase, contractId, signer: kmsSigner });
+```
+
+## Fee-bump transactions
+
+Set `feeSource` (a `Keypair` or `Signer`) on the writer, or `SANCTIONS_ORACLE_FEE_SOURCE_SECRET_KEY` for the CLI, and each transaction is wrapped in a `FeeBumpTransaction` paid by that account. The oracle key then only authorizes the call and needs no XLM for fees. Dry-run never builds or submits transactions.
+
+## Max duration
+
+`SyncOptions.maxDurationMs` / `--max-duration <ms>` sets a hard deadline. When it elapses no new checks start, in-flight checks finish, flagged addresses are written and checkpointed, and the result reports `deadlineExceeded: true` plus `unprocessed`. The CLI then exits with code **3** (`EXIT_CODE_DEADLINE_EXCEEDED`).

@@ -31,3 +31,4 @@ export {
   type TracingContext,
   type TracingOptions,
 } from '@compliance-adapters/tracing';
+export { extractTraceContext } from '@compliance-adapters/tracing';

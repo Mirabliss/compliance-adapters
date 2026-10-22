@@ -3,7 +3,14 @@
  * SPDX-License-Identifier: MIT
  */
 
-export { HorizonListener, type HorizonListenerOptions, type StartOptions, type Logger } from './listener';
+/**
+ * horizon-listener — NOTE: despite the name, this package consumes Soroban RPC
+ * `getEvents`, not the Horizon REST/SSE API. Point it at a Soroban RPC endpoint.
+ * A rename (e.g. `@compliance-adapters/event-listener`) with a deprecation
+ * alias is tracked as a follow-up discussion.
+ */
+
+export { HorizonListener, type HorizonListenerOptions, type Logger } from './listener';
 export {
   RpcEventSource,
   CursorOutOfRangeError,
@@ -11,6 +18,7 @@ export {
   type EventSource,
   type RawContractEvent,
   type RpcEventSourceOptions,
+  type RpcEventType,
 } from './eventSource';
 export {
   HorizonEventSource,
@@ -20,11 +28,26 @@ export {
 export {
   InMemoryDeadLetterQueue,
   FileDeadLetterQueue,
+  replayDeadLetterQueue,
   type DeadLetterEvent,
   type DeadLetterQueue,
+  type ReplayDeadLetterQueueOptions,
+  type ReplayDeadLetterQueueResult,
 } from './deadLetterQueue';
 export { computeBackoffDelayMs, type BackoffOptions } from '@compliance-adapters/backoff';
-export { HttpWebhookSender, WebhookHttpError, type WebhookSender, type HttpWebhookSenderOptions } from './webhook';
+export {
+  HttpWebhookSender,
+  WebhookHttpError,
+  WEBHOOK_SCHEMA_VERSION,
+  type WebhookSender,
+  type HttpWebhookSenderOptions,
+} from './webhook';
+export {
+  MultiWebhookSender,
+  MultiWebhookDeliveryError,
+  type MultiWebhookSenderOptions,
+  type WebhookTarget,
+} from './multiWebhook';
 export { createWebhookForwarder, type WebhookForwarderOptions } from './factory';
 export {
   MetricsRegistry,
@@ -50,4 +73,5 @@ export {
   type SpanExporter,
   type TracingContext,
   type TracingOptions,
+  extractTraceContext,
 } from './tracing';

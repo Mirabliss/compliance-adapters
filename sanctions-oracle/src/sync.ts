@@ -7,6 +7,8 @@ import * as fs from 'fs';
 import {
   Contract,
   Keypair,
+  Transaction,
+  FeeBumpTransaction,
   TransactionBuilder,
   BASE_FEE,
   nativeToScVal,
@@ -24,6 +26,7 @@ import { RateLimitedSanctionsProvider } from './rateLimitedProvider';
 import { type AnyTracer, NoopTracer } from './tracing';
 import { type AnyMetricsRegistry, NoopMetricsRegistry } from './metrics';
 import { withRetry, RetryOptions } from './retry';
+import { type Signer, toSigner, signTransaction } from './signer';
 import { computeBackoffDelayMs, BackoffOptions } from '@compliance-adapters/backoff';
 
 interface CacheEntry {
@@ -271,7 +274,17 @@ export interface SyncOptions {
    * Defaults to false.
    */
   resume?: boolean;
+  /**
+   * Optional hard deadline for the run, in milliseconds. Once it passes, no
+   * new provider checks are started; in-flight checks finish, already-flagged
+   * addresses are written and checkpointed, and the result reports
+   * `deadlineExceeded: true` with the untouched addresses in `unprocessed`.
+   */
+  maxDurationMs?: number;
 }
+
+/** CLI exit code used when a run stops because `--max-duration` elapsed. */
+export const EXIT_CODE_DEADLINE_EXCEEDED = 3;
 
 /**
  * A single address whose provider check failed on every retry attempt,
@@ -334,6 +347,10 @@ export interface SyncResult {
   plannedRemovals?: { address: string; source: string }[];
   /** Reconcile mode only: cleared addresses whose removal transaction failed. */
   failedRemovals?: FailedAddress[];
+  /** True when {@link SyncOptions.maxDurationMs} elapsed before every address was checked. */
+  deadlineExceeded?: boolean;
+  /** Addresses never checked because the deadline elapsed. */
+  unprocessed?: string[];
 }
 
 interface FlaggedAddressWithSource {
@@ -345,9 +362,11 @@ async function executeConcurrent<T>(
   items: T[],
   fn: (item: T) => Promise<void>,
   concurrency?: number,
+  shouldStop: () => boolean = () => false,
 ): Promise<void> {
   if (!concurrency || concurrency >= items.length) {
     for (const item of items) {
+      if (shouldStop()) return;
       await fn(item);
     }
     return;
@@ -357,7 +376,7 @@ async function executeConcurrent<T>(
   const active: Promise<void>[] = [];
 
   while (queue.length > 0 || active.length > 0) {
-    while (active.length < concurrency && queue.length > 0) {
+    while (active.length < concurrency && queue.length > 0 && !shouldStop()) {
       const item = queue.shift()!;
       const promise = fn(item).then(() => {
         active.splice(active.indexOf(promise), 1);
@@ -388,7 +407,11 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
     checkpoint,
     resume = false,
     reconcile = false,
+    maxDurationMs,
   } = options;
+  const deadline = maxDurationMs !== undefined ? Date.now() + maxDurationMs : undefined;
+  const pastDeadline = () => deadline !== undefined && Date.now() >= deadline;
+  const started = new Set<string>();
 
   const legacyLogger = logger as Logger & { log?: (...args: unknown[]) => void };
   const safeLogger = {
@@ -540,6 +563,7 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
   await executeConcurrent(
     pendingAddresses,
     async (address) => {
+      started.add(address);
       const start = Date.now();
       const span = tracer.startSpan('address_check');
       // address is omitted from spans by default (privacy / cardinality).
@@ -583,7 +607,15 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
       }
     },
     concurrency,
+    pastDeadline,
   );
+  const unprocessed = pendingAddresses.filter((address) => !started.has(address));
+  const deadlineExceeded = unprocessed.length > 0;
+  if (deadlineExceeded) {
+    safeLogger.warn('sanctions-oracle: max duration elapsed; stopping new checks', {
+      unprocessed: unprocessed.length,
+    });
+  }
 
   safeLogger.info('sanctions-oracle: screening complete', {
     checked: addresses.length,
@@ -686,7 +718,7 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
   }
 
   return {
-    checked: pendingAddresses.length,
+    checked: started.size,
     flagged,
     written,
     failed,
@@ -701,6 +733,7 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
           failedRemovals,
         }
       : {}),
+    ...(maxDurationMs !== undefined ? { deadlineExceeded, unprocessed } : {}),
   };
 }
 
@@ -708,7 +741,18 @@ export interface RpcDenylistWriterOptions {
   rpcUrl: string;
   networkPassphrase: string;
   contractId: string;
-  sourceKeypair: Keypair;
+  /**
+   * Oracle authority key. Either a `Keypair` or any {@link Signer}
+   * (e.g. KMS/HSM-backed). Kept as `sourceKeypair` for backward compatibility.
+   */
+  sourceKeypair?: Keypair | Signer;
+  /** Alias of `sourceKeypair` for Signer-based setups; takes precedence when both are set. */
+  signer?: Keypair | Signer;
+  /**
+   * Optional separate fee-paying account. When set, every transaction is
+   * wrapped in a FeeBumpTransaction whose fee is paid by this account.
+   */
+  feeSource?: Keypair | Signer;
   /**
    * Optional audit logger to record each denylist write for compliance purposes.
    * Called with address, timestamp, source, and resulting transaction hash.
@@ -749,11 +793,19 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
     networkPassphrase,
     contractId,
     sourceKeypair,
+    signer: signerOption,
+    feeSource: feeSourceOption,
     auditLogger,
     maxRetries = 3,
     backoffOptions,
     logger = noopLogger,
   } = options;
+  const authority = signerOption ?? sourceKeypair;
+  if (!authority) {
+    throw new Error('sanctions-oracle: createRpcDenylistWriter requires a signer or sourceKeypair');
+  }
+  const signer = toSigner(authority);
+  const feeSigner = feeSourceOption ? toSigner(feeSourceOption) : undefined;
   const server = new rpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith('http://') });
   const contract = new Contract(contractId);
 
@@ -763,7 +815,7 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
     address: string,
     method: 'add_to_denylist' | 'remove_from_denylist' = 'add_to_denylist',
   ): Promise<{ hash: string }> {
-    const account = await server.getAccount(sourceKeypair.publicKey());
+    const account = await server.getAccount(signer.publicKey());
 
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -781,12 +833,23 @@ export function createRpcDenylistWriter(options: RpcDenylistWriterOptions): Deny
       throw new Error(`Failed to prepare transaction (simulation error): ${err}`);
     }
 
-    prepared.sign(sourceKeypair);
+    await signTransaction(prepared, signer);
+
+    let envelope: Transaction | FeeBumpTransaction = prepared;
+    if (feeSigner) {
+      envelope = TransactionBuilder.buildFeeBumpTransaction(
+        feeSigner.publicKey(),
+        BASE_FEE,
+        prepared,
+        networkPassphrase,
+      );
+      await signTransaction(envelope, feeSigner);
+    }
 
     let lastError;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        const sendResult = await server.sendTransaction(prepared);
+        const sendResult = await server.sendTransaction(envelope);
         return { hash: sendResult.hash };
       } catch (error) {
         lastError = error;
@@ -956,6 +1019,15 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--reconcile':
         args.reconcile = true;
         break;
+      case '--max-duration': {
+        const ms = Number(readValue(arg, i));
+        if (!Number.isFinite(ms) || ms <= 0) {
+          throw new Error('--max-duration must be a positive number of milliseconds');
+        }
+        args.maxDurationMs = ms;
+        i += 1;
+        break;
+      }
       case '--denylist-snapshot':
         args.denylistSnapshotPath = readValue(arg, i);
         i += 1;
@@ -1007,6 +1079,9 @@ OPTIONS:
   --reconcile                 Opt in to delisting: remove addresses from the denylist once the
                                provider no longer flags them (requires --denylist-snapshot);
                                combine with --dry-run to preview the planned removals
+  --max-duration <ms>         Hard deadline for the run. When it elapses no new checks start,
+                               in-flight checks finish, results are saved and the process
+                               exits with code 3 (EXIT_CODE_DEADLINE_EXCEEDED)
   --denylist-snapshot <path>  Path to JSON file containing an array of the addresses currently
                                on the denylist
   --dry-run                   Preview output without writing to the contract
@@ -1017,6 +1092,8 @@ OPTIONS:
 
 ENVIRONMENT:
   SANCTIONS_ORACLE_SECRET_KEY  Source account secret key (preferred over --secret-key)
+  SANCTIONS_ORACLE_FEE_SOURCE_SECRET_KEY  Optional separate fee account; when set every
+                               transaction is wrapped in a fee-bump paid by this account
 
 EXAMPLES:
   # Dry-run mode: check addresses without writing
@@ -1137,12 +1214,14 @@ export async function runCli(argv?: string[]): Promise<void> {
       logger,
       currentDenylist,
       reconcile: args.reconcile,
+      maxDurationMs: args.maxDurationMs,
     });
     if (!args.json) logger.info('sanctions-oracle: dry-run result', result);
     // CLI-only: the machine-readable result is written to stdout so it can be
     // piped/redirected independently of the human-readable logger stream.
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(result, null, 2));
+    if (result.deadlineExceeded) process.exitCode = EXIT_CODE_DEADLINE_EXCEEDED;
     return;
   }
 
@@ -1192,6 +1271,7 @@ export async function runCli(argv?: string[]): Promise<void> {
   // CLI-only: machine-readable result to stdout (see dry-run branch above).
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(result, null, 2));
+  if (result.deadlineExceeded) process.exitCode = EXIT_CODE_DEADLINE_EXCEEDED;
 }
 
 if (require.main === module) {

@@ -126,9 +126,16 @@ function isRateLimitError(err: unknown): boolean {
     }
   }
   // Support providers that attach a `.status` or `.statusCode` field to errors
-  // (e.g. axios, node-fetch HttpError subclasses).
+  // (e.g. axios, node-fetch HttpError subclasses). Axios places the HTTP
+  // status of a rejected request on the nested `error.response.status`
+  // rather than on the error object itself, so check that shape too.
+  const responseStatus = (err as { response?: { status?: unknown; statusCode?: unknown } })
+    .response;
   const statusCode =
-    (err as { status?: unknown }).status ?? (err as { statusCode?: unknown }).statusCode;
+    (err as { status?: unknown }).status ??
+    (err as { statusCode?: unknown }).statusCode ??
+    responseStatus?.status ??
+    responseStatus?.statusCode;
   return statusCode === 429;
 }
 
