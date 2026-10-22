@@ -17,6 +17,52 @@ export interface Logger {
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+  /** Return a child logger with `bindings` prepended to every log line. */
+  child?: (bindings: Record<string, unknown>) => Logger;
+}
+
+/**
+ * Return a child logger bound to `bindings`. Uses `logger.child` when
+ * available, otherwise falls back to a wrapper that prepends the bindings
+ * object to every call. Nested children merge bindings (inner wins).
+ */
+export function getChildLogger(logger: Logger, bindings: Record<string, unknown>): Logger {
+  if (typeof logger.child === 'function') return logger.child(bindings);
+  const wrap = (fn: (...args: unknown[]) => void) => (...args: unknown[]) => fn(bindings, ...args);
+  const child: Logger = {
+    debug: wrap(logger.debug.bind(logger)),
+    info: wrap(logger.info.bind(logger)),
+    warn: wrap(logger.warn.bind(logger)),
+    error: wrap(logger.error.bind(logger)),
+    child: (next: Record<string, unknown>) =>
+      getChildLogger(logger, { ...bindings, ...next }),
+  };
+  return child;
+}
+
+/** Merge parent and child bindings; child keys win. */
+function mergeBindings(
+  parent: Record<string, unknown>,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...parent, ...next };
+}
+
+/** Build a child of `base` that prepends `bindings` to every call. */
+function makeBoundChild(
+  base: Logger,
+  bindings: Record<string, unknown>,
+  emit: (level: LogLevel, bindings: Record<string, unknown>, args: unknown[]) => void,
+): Logger {
+  const child: Logger = {
+    debug: (...args: unknown[]) => emit('debug', bindings, args),
+    info: (...args: unknown[]) => emit('info', bindings, args),
+    warn: (...args: unknown[]) => emit('warn', bindings, args),
+    error: (...args: unknown[]) => emit('error', bindings, args),
+    child: (next: Record<string, unknown>) =>
+      makeBoundChild(base, mergeBindings(bindings, next), emit),
+  };
+  return child;
 }
 
 /**
@@ -28,6 +74,10 @@ export const consoleLogger: Logger = {
   info: (...args: unknown[]) => console.info(...args),
   warn: (...args: unknown[]) => console.warn(...args),
   error: (...args: unknown[]) => console.error(...args),
+  child: (bindings: Record<string, unknown>) =>
+    makeBoundChild(consoleLogger, bindings, (level, b, args) => {
+      console[level](b, ...args);
+    }),
 };
 
 /**
@@ -40,6 +90,7 @@ export const noopLogger: Logger = {
   info: () => undefined,
   warn: () => undefined,
   error: () => undefined,
+  child: () => noopLogger,
 };
 
 /**
@@ -77,19 +128,19 @@ const LOG_LEVEL_RANK: Record<LogLevel, number> = {
  */
 export function createLeveledLogger(base: Logger, minLevel: LogLevel): Logger {
   const minRank = LOG_LEVEL_RANK[minLevel];
+  const emit = (level: LogLevel, args: unknown[]) => {
+    if (LOG_LEVEL_RANK[level] >= minRank) base[level](...args);
+  };
+  const emitBound = (level: LogLevel, bindings: Record<string, unknown>, args: unknown[]) => {
+    if (LOG_LEVEL_RANK[level] >= minRank) getChildLogger(base, bindings)[level](...args);
+  };
   return {
-    debug: (...args: unknown[]) => {
-      if (LOG_LEVEL_RANK.debug >= minRank) base.debug(...args);
-    },
-    info: (...args: unknown[]) => {
-      if (LOG_LEVEL_RANK.info >= minRank) base.info(...args);
-    },
-    warn: (...args: unknown[]) => {
-      if (LOG_LEVEL_RANK.warn >= minRank) base.warn(...args);
-    },
-    error: (...args: unknown[]) => {
-      if (LOG_LEVEL_RANK.error >= minRank) base.error(...args);
-    },
+    debug: (...args: unknown[]) => emit('debug', args),
+    info: (...args: unknown[]) => emit('info', args),
+    warn: (...args: unknown[]) => emit('warn', args),
+    error: (...args: unknown[]) => emit('error', args),
+    child: (bindings: Record<string, unknown>) =>
+      makeBoundChild(base, bindings, emitBound),
   };
 }
 
