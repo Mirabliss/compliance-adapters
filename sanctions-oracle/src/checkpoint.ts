@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
-import { promises as fs } from 'node:fs';
-import { dirname } from 'node:path';
+import * as fs from 'fs';
+import type { Logger } from '@compliance-adapters/logger';
 
 /**
  * Persistence contract used by resumable sanctions syncs.
@@ -183,11 +183,66 @@ export class InMemoryCheckpointStore implements CheckpointStore, SyncCheckpointS
   }
 }
 
-function isFileNotFound(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === 'ENOENT'
-  );
+/**
+ * File-backed {@link SyncCheckpointStore} that persists completed addresses as
+ * a JSON array, so a sync can resume after the process is killed.
+ *
+ * Writes are atomic: the snapshot is written to `<path>.tmp` and then renamed
+ * over `path`, so a crash mid-write never leaves a truncated checkpoint. If the
+ * existing file can't be parsed anyway (e.g. written by an older, non-atomic
+ * version), it is moved aside to `<path>.corrupt-<timestamp>`, a warning is
+ * logged, and the store starts fresh instead of crashing the sync.
+ */
+export class FileCheckpointStore implements SyncCheckpointStore {
+  private readonly completed: Set<string>;
+
+  constructor(
+    private readonly path: string,
+    logger?: Pick<Logger, 'warn'>,
+  ) {
+    this.completed = new Set(FileCheckpointStore.load(path, logger));
+  }
+
+  private static load(path: string, logger?: Pick<Logger, 'warn'>): string[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === 'string')) {
+        throw new Error('checkpoint must be a JSON array of strings');
+      }
+      return parsed;
+    } catch (error) {
+      const corruptPath = `${path}.corrupt-${Date.now()}`;
+      fs.renameSync(path, corruptPath);
+      logger?.warn('sanctions-oracle: checkpoint file is corrupt; starting fresh', {
+        path,
+        movedTo: corruptPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  }
+
+  isComplete(address: string): boolean {
+    return this.completed.has(address);
+  }
+
+  markComplete(address: string): void {
+    if (this.completed.has(address)) return;
+    this.completed.add(address);
+    const tmpPath = `${this.path}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify([...this.completed]));
+    fs.renameSync(tmpPath, this.path);
+  }
+
+  /** All addresses recorded as complete so far. */
+  snapshot(): string[] {
+    return [...this.completed];
+  }
 }
