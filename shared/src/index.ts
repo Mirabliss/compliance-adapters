@@ -6,7 +6,11 @@
 import { StrKey } from '@stellar/stellar-sdk';
 
 export { combineExpositions } from './metrics';
-export { createSemaphore } from './semaphore';
+export {
+  createSemaphore,
+  SemaphoreTimeoutError,
+} from './semaphore';
+export type { Semaphore, SemaphoreAcquireOptions } from './semaphore';
 
 /**
  * Validate a Stellar address (Ed25519 public key in StrKey `G...` format).
