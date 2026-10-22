@@ -33,3 +33,17 @@ export function isValidStellarAddress(address: string): boolean {
 export function normalizeStellarAddress(address: string): string {
   return address.trim().toUpperCase();
 }
+
+/**
+ * Redact a Stellar address for logs: keeps the first 4 and last 4
+ * characters (`GABC…WXYZ`) so log lines stay correlatable without
+ * exposing the full account. Applies to `G` (ed25519), `M` (muxed)
+ * and `C` (contract) addresses. Returns `[invalid-address]` for
+ * non-string or too-short input.
+ */
+export function redactAddress(addr: unknown): string {
+  if (typeof addr !== 'string' || addr.length < 8) {
+    return '[invalid-address]';
+  }
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}

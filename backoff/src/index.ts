@@ -28,6 +28,43 @@ export interface RetryWithBackoffOptions extends BackoffOptions {
 
 export type RetryOptions = RetryWithBackoffOptions;
 
+/**
+ * Abort-aware sleep: resolves after `ms`, rejects with an `AbortError`
+ * when `signal` aborts, and always clears its timer (no open handles).
+ */
+export function sleep(ms: number, options: { signal?: AbortSignal } = {}): Promise<void> {
+  const { signal } = options;
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? createAbortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      cleanup();
+      reject(signal?.reason ?? createAbortError());
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function createAbortError(): Error {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException('Aborted', 'AbortError');
+  }
+  const err = new Error('Aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
 // randomFn is injectable (defaulting to Math.random) so tests can assert an
 // exact delay instead of a range, and so callers can disable jitter entirely
 // for deterministic timing assertions.

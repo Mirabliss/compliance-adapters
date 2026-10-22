@@ -142,6 +142,20 @@ jobs:
             --threshold-percent 20 \
             --summary-file benchmark-summary.md
 
+      - name: Run HorizonListener Webhook Throughput Benchmark
+        id: benchmark-listener
+        run: |
+          npm run --silent bench --workspace=horizon-listener | tee listener-benchmark.log
+
+      - name: Evaluate listener benchmark regression threshold
+        id: benchmark-listener-regression
+        run: |
+          node scripts/validate-benchmark.js \
+            --log-file listener-benchmark.log \
+            --baseline-file horizon-listener/bench/listener-throughput-baseline.json \
+            --threshold-percent 20 \
+            --summary-file listener-benchmark-summary.md
+
       - name: Upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -150,6 +164,8 @@ jobs:
           path: |
             benchmark.log
             benchmark-summary.md
+            listener-benchmark.log
+            listener-benchmark-summary.md
 
       - name: Comment benchmark results to job summary
         if: always()
