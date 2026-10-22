@@ -13,6 +13,11 @@ export {
   type RpcEventSourceOptions,
 } from './eventSource';
 export {
+  HorizonEventSource,
+  type HorizonEventSourceOptions,
+  type HorizonRecord,
+} from './horizonEventSource';
+export {
   InMemoryDeadLetterQueue,
   FileDeadLetterQueue,
   type DeadLetterEvent,
@@ -28,6 +33,7 @@ export {
   type Phase,
   type AnyMetricsRegistry,
   type Counter,
+  type Gauge,
   type Histogram,
   type Outcome,
   type MetricsRegistryOptions,
