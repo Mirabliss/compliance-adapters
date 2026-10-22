@@ -47,7 +47,7 @@ function buildSignedChallenge(
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Security: signature substitution', () => {
-  it('rejects a challenge signed by a different (valid) keypair instead of the client', () => {
+  it('rejects a challenge signed by a different (valid) keypair instead of the client', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const attackerKeypair = Keypair.random(); // attacker has a valid Stellar keypair
@@ -61,7 +61,7 @@ describe('Security: signature substitution', () => {
     // Attacker signs the challenge with their own key instead of the client's.
     const attackerSignedXDR = signAs(challenge.transactionXDR, attackerKeypair);
 
-    const result = verifyChallenge(attackerSignedXDR, {
+    const result = await verifyChallenge(attackerSignedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -73,7 +73,7 @@ describe('Security: signature substitution', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('rejects when the challenge is double-signed by both client and attacker (only client sig expected)', () => {
+  it('rejects when the challenge is double-signed by both client and attacker (only client sig expected)', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const attackerKeypair = Keypair.random();
@@ -91,7 +91,7 @@ describe('Security: signature substitution', () => {
 
     // The SEP-10 spec requires the signer set to match exactly the client
     // account — extra unrecognised signers should not be silently accepted.
-    const result = verifyChallenge(doubleSignedXDR, {
+    const result = await verifyChallenge(doubleSignedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -104,7 +104,7 @@ describe('Security: signature substitution', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('rejects when the attacker replaces the client signature with their own (no client sig)', () => {
+  it('rejects when the attacker replaces the client signature with their own (no client sig)', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
     const attackerKeypair = Keypair.random();
@@ -118,7 +118,7 @@ describe('Security: signature substitution', () => {
     // Only the attacker signs — client never touches it.
     const attackerOnlyXDR = signAs(challenge.transactionXDR, attackerKeypair);
 
-    const result = verifyChallenge(attackerOnlyXDR, {
+    const result = await verifyChallenge(attackerOnlyXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -135,7 +135,7 @@ describe('Security: signature substitution', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Security: domain confusion', () => {
-  it('rejects a challenge built for domain A when verified against domain B', () => {
+  it('rejects a challenge built for domain A when verified against domain B', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -143,7 +143,7 @@ describe('Security: domain confusion', () => {
     const signedXDR = buildSignedChallenge(serverKeypair, clientKeypair, HOME_DOMAIN);
 
     // … but the verifier claims to be OTHER_DOMAIN.
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: OTHER_DOMAIN,
@@ -155,13 +155,13 @@ describe('Security: domain confusion', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('rejects when homeDomain matches but webAuthDomain is wrong', () => {
+  it('rejects when homeDomain matches but webAuthDomain is wrong', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
     const signedXDR = buildSignedChallenge(serverKeypair, clientKeypair, HOME_DOMAIN);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -172,7 +172,7 @@ describe('Security: domain confusion', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('rejects when the challenge uses a different server keypair than expected', () => {
+  it('rejects when the challenge uses a different server keypair than expected', async () => {
     const serverKeypairA = Keypair.random(); // actual issuer
     const serverKeypairB = Keypair.random(); // what the verifier trusts
     const clientKeypair = Keypair.random();
@@ -180,7 +180,7 @@ describe('Security: domain confusion', () => {
     const signedXDR = buildSignedChallenge(serverKeypairA, clientKeypair);
 
     // Verifier trusts serverKeypairB but challenge was signed by serverKeypairA.
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypairB.publicKey(), // wrong server
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -191,13 +191,13 @@ describe('Security: domain confusion', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('accepts a correctly-paired challenge when multiple home domains are allowed', () => {
+  it('accepts a correctly-paired challenge when multiple home domains are allowed', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
     const signedXDR = buildSignedChallenge(serverKeypair, clientKeypair, HOME_DOMAIN);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: [HOME_DOMAIN, OTHER_DOMAIN], // both allowed
@@ -229,7 +229,7 @@ describe('Security: challenge tampering', () => {
     return buf.toString('base64');
   }
 
-  it('rejects a challenge whose XDR has been mutated after signing', () => {
+  it('rejects a challenge whose XDR has been mutated after signing', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -238,7 +238,7 @@ describe('Security: challenge tampering', () => {
 
     // A tampered XDR will either fail to parse, fail signature verification,
     // or fail the SEP-10 structural checks — all of which should return invalid.
-    const result = verifyChallenge(tamperedXDR, {
+    const result = await verifyChallenge(tamperedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -249,7 +249,7 @@ describe('Security: challenge tampering', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('rejects a challenge whose operation memo has been altered after signing', () => {
+  it('rejects a challenge whose operation memo has been altered after signing', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
@@ -272,7 +272,7 @@ describe('Security: challenge tampering', () => {
     txXdr[midpoint] = txXdr[midpoint] ^ 0x01;
     const tamperedBase64 = txXdr.toString('base64');
 
-    const result = verifyChallenge(tamperedBase64, {
+    const result = await verifyChallenge(tamperedBase64, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,
@@ -283,13 +283,13 @@ describe('Security: challenge tampering', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('accepts the original XDR unchanged after signing (control case)', () => {
+  it('accepts the original XDR unchanged after signing (control case)', async () => {
     const serverKeypair = Keypair.random();
     const clientKeypair = Keypair.random();
 
     const signedXDR = buildSignedChallenge(serverKeypair, clientKeypair);
 
-    const result = verifyChallenge(signedXDR, {
+    const result = await verifyChallenge(signedXDR, {
       serverAccountId: serverKeypair.publicKey(),
       networkPassphrase: NETWORK,
       homeDomains: HOME_DOMAIN,

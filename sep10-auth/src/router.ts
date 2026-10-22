@@ -13,7 +13,7 @@ import {
   InvalidMemoError,
   assertBareDomain,
 } from './challenge';
-import { verifyChallenge } from './verify';
+import { verifyChallenge, AccountLoader } from './verify';
 import { issueJwt } from './jwt';
 import { rateLimiter, RateLimiterOptions } from './rate-limiter';
 
@@ -57,6 +57,15 @@ export interface Sep10RouterOptions {
   resolveClientSigningKey?: (clientDomain: string) => string | Promise<string>;
   /** Maximum accepted length of the posted transaction. @default 8192 */
   maxTransactionLength?: number;
+  /**
+   * Optional account loader for on-ledger signer / threshold verification of
+   * the client account during `POST /auth` challenge verification. When
+   * provided, the challenge signatures are verified against the account's
+   * on-ledger signer set and medium threshold (SEP-10 for existing accounts).
+   * When the account doesn't exist on the ledger, falls back to the master-key
+   * check. See {@link verifyChallenge}'s `accountLoader` option for details.
+   */
+  accountLoader?: AccountLoader;
   logger?: Logger;
 }
 
@@ -213,11 +222,12 @@ export function createSep10Router(options: Sep10RouterOptions): Router {
         return;
       }
 
-      const result = verifyChallenge(transaction, {
+      const result = await verifyChallenge(transaction, {
         serverAccountId: options.serverKeypair.publicKey(),
         networkPassphrase,
         homeDomains,
         webAuthDomain: webAuthDomains,
+        ...(options.accountLoader ? { accountLoader: options.accountLoader } : {}),
       });
 
       if (!result.valid) {

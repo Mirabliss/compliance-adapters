@@ -70,10 +70,10 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * an uncaught throw. This catches unguarded JSON.parse, atob, or XDR
    * parsing that might surface internal SDK errors.
    */
-  it('P1: never throws for arbitrary unicode strings', () => {
-    fc.assert(
-      fc.property(fc.string(), (input) => {
-        const result = verifyChallenge(input, verifyOpts);
+  it('P1: never throws for arbitrary unicode strings', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.string(), async (input) => {
+        const result = await verifyChallenge(input, verifyOpts);
         assertValidResult(result);
         // Arbitrary garbage strings must always fail verification cleanly
         expect(result.valid).toBe(false);
@@ -88,15 +88,15 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * Inputs that are syntactically valid base64 but decode to random bytes.
    * The SDK's XDR parser must fail gracefully and not throw.
    */
-  it('P2: never throws for malformed-but-valid base64 input', () => {
+  it('P2: never throws for malformed-but-valid base64 input', async () => {
     // fc.base64String() generates strings safe for standard base64 encoding
     const base64Arb = fc
       .uint8Array({ minLength: 1, maxLength: 1024 })
       .map((bytes) => Buffer.from(bytes).toString('base64'));
 
-    fc.assert(
-      fc.property(base64Arb, (input) => {
-        const result = verifyChallenge(input, verifyOpts);
+    await fc.assert(
+      fc.asyncProperty(base64Arb, async (input) => {
+        const result = await verifyChallenge(input, verifyOpts);
         assertValidResult(result);
         expect(result.valid).toBe(false);
         expect(result.address).toBe('');
@@ -110,7 +110,7 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * Take a real challenge XDR and slice bytes off the end.
    * The parser must handle incomplete XDR without throwing.
    */
-  it('P3: never throws for truncated XDR', () => {
+  it('P3: never throws for truncated XDR', async () => {
     const clientKeypair = Keypair.random();
     const validXDR = buildValidSignedXDR(clientKeypair);
     // validXDR is base64; decode, truncate raw bytes, re-encode
@@ -120,9 +120,9 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
       .integer({ min: 0, max: Math.max(0, validBytes.length - 1) })
       .map((cutAt) => validBytes.slice(0, cutAt).toString('base64'));
 
-    fc.assert(
-      fc.property(truncatedArb, (truncatedInput) => {
-        const result = verifyChallenge(truncatedInput, verifyOpts);
+    await fc.assert(
+      fc.asyncProperty(truncatedArb, async (truncatedInput) => {
+        const result = await verifyChallenge(truncatedInput, verifyOpts);
         assertValidResult(result);
         // Truncated XDR can never be a valid signed challenge
         expect(result.valid).toBe(false);
@@ -138,7 +138,7 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * payload. The verification must fail cleanly — no throws, no valid=true
    * (collision probability is negligible).
    */
-  it('P4: never throws for single-bit-flipped XDR', () => {
+  it('P4: never throws for single-bit-flipped XDR', async () => {
     const clientKeypair = Keypair.random();
     const validXDR = buildValidSignedXDR(clientKeypair);
     const validBytes = Buffer.from(validXDR, 'base64');
@@ -155,9 +155,9 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
           }),
       );
 
-    fc.assert(
-      fc.property(flippedArb, (corruptedInput) => {
-        const result = verifyChallenge(corruptedInput, verifyOpts);
+    await fc.assert(
+      fc.asyncProperty(flippedArb, async (corruptedInput) => {
+        const result = await verifyChallenge(corruptedInput, verifyOpts);
         assertValidResult(result);
         // A bit-flip anywhere in the XDR should always fail verification
         expect(result.valid).toBe(false);
@@ -171,7 +171,7 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * Targeted fixed-value edge cases that property engines can miss if they
    * don't generate degenerate values in the first few runs.
    */
-  it('P5: handles edge-case inputs without throwing', () => {
+  it('P5: handles edge-case inputs without throwing', async () => {
     const edgeCases = [
       '',
       ' ',
@@ -193,8 +193,7 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
     ];
 
     for (const input of edgeCases) {
-      expect(() => verifyChallenge(input, verifyOpts)).not.toThrow();
-      const result = verifyChallenge(input, verifyOpts);
+      const result = await verifyChallenge(input, verifyOpts);
       assertValidResult(result);
       expect(result.valid).toBe(false);
     }
@@ -205,11 +204,11 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * Even on genuinely valid signed XDRs the result shape contract must hold,
    * and error must be absent (not merely undefined).
    */
-  it('P6: valid signed XDR returns { valid: true, address: G..., no error }', () => {
+  it('P6: valid signed XDR returns { valid: true, address: G..., no error }', async () => {
     const clientKeypair = Keypair.random();
     const validXDR = buildValidSignedXDR(clientKeypair);
 
-    const result = verifyChallenge(validXDR, verifyOpts);
+    const result = await verifyChallenge(validXDR, verifyOpts);
     assertValidResult(result);
     expect(result.valid).toBe(true);
     expect(result.address).toBe(clientKeypair.publicKey());
@@ -222,7 +221,7 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * chars — this exercises a slightly different code path than raw arbitrary
    * strings because the base64 decode succeeds but XDR parsing fails.
    */
-  it('P7: never throws for correctly-padded random-byte base64', () => {
+  it('P7: never throws for correctly-padded random-byte base64', async () => {
     // Build strings whose raw byte count is a multiple of 3 so there's no
     // padding character to complain about; then also test the 1/2 remainder
     // cases explicitly to cover all padding variants.
@@ -237,9 +236,9 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
         return Buffer.from(trimmed).toString('base64');
       });
 
-    fc.assert(
-      fc.property(paddingArb, (input) => {
-        const result = verifyChallenge(input, verifyOpts);
+    await fc.assert(
+      fc.asyncProperty(paddingArb, async (input) => {
+        const result = await verifyChallenge(input, verifyOpts);
         assertValidResult(result);
         expect(result.valid).toBe(false);
         expect(result.address).toBe('');
@@ -256,13 +255,12 @@ describe('verifyChallenge – property-based / fuzz tests', () => {
    * unexpectedly.  Verify the implementation is robust against implicit
    * coercions that TypeScript can't prevent at runtime.
    */
-  it('P8: never throws for non-string-like runtime values coerced to strings', () => {
+  it('P8: never throws for non-string-like runtime values coerced to strings', async () => {
     const nonStrings: unknown[] = [null, undefined, 0, -1, NaN, Infinity, {}, [], true, false];
 
     for (const value of nonStrings) {
       // Cast to string as a hostile caller would; verify no throw
-      expect(() => verifyChallenge(String(value), verifyOpts)).not.toThrow();
-      const result = verifyChallenge(String(value), verifyOpts);
+      const result = await verifyChallenge(String(value), verifyOpts);
       assertValidResult(result);
       expect(result.valid).toBe(false);
     }

@@ -108,9 +108,9 @@ addresses currently on the denylist); combine with `--dry-run` to preview.
 
 ### Resuming an interrupted sync
 
-Pass a `SyncOptions.checkpoint` store (interface `SyncCheckpointStore`, with
-an in-memory reference implementation `InMemoryCheckpointStore` — same
-"bring your own persistence" pattern as sep10-auth's `RevocationStore`) and
+Pass a `SyncOptions.checkpoint` store (interface `CheckpointStore`, with
+`FileCheckpointStore`, `RedisCheckpointStore`, and an in-memory reference
+implementation `InMemoryCheckpointStore`) and
 the sync records each address as it finishes: clean addresses right after
 the provider check, flagged addresses only once their denylist write
 succeeds. On a later run with `resume: true`, any address the checkpoint

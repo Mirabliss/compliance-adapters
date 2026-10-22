@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { EventSource, RawContractEvent } from './eventSource';
+import { CursorOutOfRangeError, type EventSource, type RawContractEvent } from './eventSource';
 import { computeBackoffDelayMs, type BackoffOptions } from '@compliance-adapters/backoff';
 import { type AnyMetricsRegistry, NoopMetricsRegistry } from './metrics';
-import { type AnyTracer, NoopTracer } from './tracing';
+import { type AnyTracer, NoopTracer, type TracingContext } from './tracing';
 import { type Logger, consoleLogger } from '@compliance-adapters/logger';
 
 // Re-export so existing consumers that imported Logger from this module
@@ -74,6 +74,20 @@ export interface HorizonListenerOptions {
    * ```
    */
   tracer?: AnyTracer;
+  /**
+   * Maximum number of events processed in parallel within a page. Defaults
+   * to 1 (strictly sequential). Events sharing an ordering key are always
+   * processed in order; the cursor only advances once the whole page is done,
+   * so no unprocessed event is ever skipped and no new page is fetched while
+   * handlers are still in flight (backpressure).
+   */
+  concurrency?: number;
+  /**
+   * How events are grouped for ordering when `concurrency > 1`.
+   * 'contract' (default): events from the same contract run in order.
+   * 'none': no ordering guarantee between any events.
+   */
+  orderingKey?: 'contract' | 'none';
 }
 
 // Below this, polling a remote Soroban RPC is almost certainly a misconfiguration
@@ -110,6 +124,8 @@ export class HorizonListener {
   private readonly mode: 'poll' | 'stream';
   private readonly metrics: AnyMetricsRegistry;
   private readonly tracer: AnyTracer;
+  private readonly concurrency: number;
+  private readonly orderingKey: 'contract' | 'none';
 
   private cursor: string | undefined;
   private running = false;
@@ -138,6 +154,8 @@ export class HorizonListener {
     this.mode = options.mode ?? 'poll';
     this.metrics = options.metrics ?? new NoopMetricsRegistry();
     this.tracer = options.tracer ?? new NoopTracer();
+    this.concurrency = Math.max(1, Math.floor(options.concurrency ?? 1));
+    this.orderingKey = options.orderingKey ?? 'contract';
   }
 
   // Soroban RPC's getEvents is a polling/cursor API, not a persistent stream, so
@@ -146,8 +164,89 @@ export class HorizonListener {
    * Starts the event listener loop.
    * @throws {Error} When max retries are exceeded for consecutive polling failures.
    * This is an unrecoverable error that indicates the listener cannot continue.
+   * @throws {CursorOutOfRangeError} When the cursor points at pruned history and `onGap` is `'fail'`.
+   *
+   * Pass `{ signal }` to stop the listener via an AbortController; the returned
+   * promise resolves once the loop has wound down. An already-aborted signal
+   * makes this a no-op.
    */
-  async start(): Promise<void> {
+  async start(options: StartOptions = {}): Promise<void> {
+    const { signal } = options;
+    if (signal?.aborted) return;
+    const onAbort = (): void => this.stop();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      await this.run();
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /**
+   * Consume events with `for await`. The listener only moves on to the next
+   * event (and only advances its cursor past a page) once the consumer pulls
+   * the next item, so a slow consumer applies backpressure to polling.
+   * Breaking out of the loop or aborting `signal` stops the listener.
+   */
+  async *events(options: StartOptions = {}): AsyncGenerator<RawContractEvent, void, undefined> {
+    const { signal } = options;
+    const queue: Array<{ event: RawContractEvent; ack: () => void }> = [];
+    let wake: (() => void) | undefined;
+    let done = false;
+    let closed = false;
+    let failure: unknown;
+    const notify = (): void => {
+      const w = wake;
+      wake = undefined;
+      w?.();
+    };
+
+    this.handler = (event) =>
+      closed || signal?.aborted
+        ? undefined
+        : new Promise<void>((ack) => {
+            queue.push({ event, ack });
+            notify();
+          });
+    const loop = this.start({ signal }).then(
+      () => {
+        done = true;
+        notify();
+      },
+      (err) => {
+        failure = err;
+        done = true;
+        notify();
+      },
+    );
+
+    let ack: (() => void) | undefined;
+    try {
+      while (true) {
+        ack?.();
+        ack = undefined;
+        while (queue.length === 0 && !done) {
+          await new Promise<void>((resolve) => (wake = resolve));
+        }
+        const item = queue.shift();
+        if (!item) {
+          if (failure !== undefined) throw failure;
+          return;
+        }
+        ack = item.ack;
+        yield item.event;
+      }
+    } finally {
+      closed = true;
+      this.stop();
+      ack?.();
+      for (const pending of queue.splice(0)) pending.ack();
+      await loop;
+      this.handler = this.onEvent;
+    }
+  }
+
+  private async run(): Promise<void> {
     this.running = true;
     this.attempt = 0;
 
@@ -168,6 +267,29 @@ export class HorizonListener {
         this.attempt += 1;
         pollSpan.setAttribute('poll.attempt', this.attempt);
         pollSpan.end('error', err instanceof Error ? err : new Error(String(err)));
+
+        if (err instanceof CursorOutOfRangeError) {
+          if (
+            this.onGap === 'skipToOldest' &&
+            err.oldestAvailable != null &&
+            this.eventSource.resetToLedger
+          ) {
+            const requested = Number(err.requested);
+            const gap = Number.isFinite(requested) ? err.oldestAvailable - requested : 'unknown';
+            this.logger.warn(
+              `horizon-listener: requested history was pruned; skipping to oldest available ledger ` +
+                `${err.oldestAvailable} (gap: ${gap} ledgers)`,
+              err,
+            );
+            this.eventSource.resetToLedger(err.oldestAvailable);
+            this.cursor = undefined;
+            this.attempt = 0;
+            continue;
+          }
+          this.running = false;
+          this.logger.error('horizon-listener: cursor is outside the RPC retention window, stopping', err);
+          throw err;
+        }
 
         this.logger.warn(
           `horizon-listener: poll failed (attempt ${this.attempt}/${this.maxRetries}), backing off`,
@@ -203,75 +325,14 @@ export class HorizonListener {
       const pollDuration = Date.now() - pollStart;
       this.metrics.counter.inc('rpc_poll', 'success');
       this.metrics.histogram.observe('rpc_poll', pollDuration);
+      this.metrics.gauge.set('rpc_poll', response.events.length);
       pollSpan.setAttribute('poll.event_count', response.events.length);
       pollSpan.end('ok');
 
       this.attempt = 0;
 
-      for (const event of response.events) {
-        const relayStart = Date.now();
-        // ── event_relay span ───────────────────────────────────────────────
-        // Parent is the poll span so spans form a coherent tree:
-        // rpc_poll → event_relay (one child per event)
-        const relayContext = { traceId: pollSpan.traceId, spanId: pollSpan.spanId };
-        const relaySpan = this.tracer.startSpan('event_relay', relayContext);
-        // Low-cardinality attributes only — event ID and contract ID are stable
-        // identifiers, not user-data payloads. The event value is redacted by
-        // the tracer (redactPayload: true by default).
-        relaySpan.setAttribute('event.id', event.id);
-        relaySpan.setAttribute('event.contract_id', event.contractId);
-        relaySpan.setAttribute('event.ledger', event.ledger);
-
-        this.logger.info('horizon-listener: received contract event', event);
-        const maxEventAttempts = this.eventRetry
-          ? Math.max(1, this.eventRetry.maxRetries ?? 3)
-          : 1;
-        let eventError: unknown;
-        let eventSucceeded = false;
-
-        for (let eventAttempt = 1; eventAttempt <= maxEventAttempts; eventAttempt += 1) {
-          try {
-            await this.onEvent(event);
-            eventSucceeded = true;
-            break;
-          } catch (err) {
-            eventError = err;
-            if (eventAttempt >= maxEventAttempts) {
-              break;
-            }
-
-            const delayMs = computeBackoffDelayMs(eventAttempt, this.eventRetry);
-            this.logger.warn(
-              `horizon-listener: onEvent failed (attempt ${eventAttempt}/${maxEventAttempts}), retrying in ${delayMs}ms`,
-              err,
-            );
-            await this.sleep(delayMs);
-          }
-        }
-
-        if (eventSucceeded) {
-          const relayDuration = Date.now() - relayStart;
-          this.metrics.counter.inc('event_relay', 'success');
-          this.metrics.histogram.observe('event_relay', relayDuration);
-          relaySpan.end('ok');
-        } else {
-          const relayDuration = Date.now() - relayStart;
-          this.logger.error('horizon-listener: onEvent handler threw', eventError);
-          this.metrics.counter.inc('event_relay', 'failure');
-          this.metrics.histogram.observe('event_relay', relayDuration);
-          relaySpan.end(
-            'error',
-            eventError instanceof Error ? eventError : new Error(String(eventError)),
-          );
-          if (this.onEventFailure) {
-            try {
-              await this.onEventFailure(event, eventError);
-            } catch (failureErr) {
-              this.logger.error('horizon-listener: onEventFailure handler threw', failureErr);
-            }
-          }
-        }
-      }
+      const relayContext = { traceId: pollSpan.traceId, spanId: pollSpan.spanId };
+      await this.processPage(response.events, relayContext);
 
       this.cursor = response.nextCursor;
       this.logger.debug('horizon-listener: cursor advanced', this.cursor);
@@ -311,6 +372,105 @@ export class HorizonListener {
         throw sleepErr;
       } finally {
         this.sleepAbortController = undefined;
+      }
+    }
+  }
+
+  // Processes a page of events. Events with the same ordering key run in
+  // sequence; distinct keys run in parallel up to `concurrency`. Resolves only
+  // once every event has been handled, so the caller can safely advance the cursor.
+  private async processPage(
+    events: RawContractEvent[],
+    relayContext: TracingContext,
+  ): Promise<void> {
+    if (this.concurrency <= 1) {
+      for (const event of events) {
+        await this.processEvent(event, relayContext);
+      }
+      return;
+    }
+
+    const lanes = new Map<string, RawContractEvent[]>();
+    events.forEach((event, i) => {
+      const key = this.orderingKey === 'contract' ? event.contractId : String(i);
+      const lane = lanes.get(key);
+      if (lane) lane.push(event);
+      else lanes.set(key, [event]);
+    });
+
+    const queue = [...lanes.values()];
+    const worker = async (): Promise<void> => {
+      for (let lane = queue.shift(); lane; lane = queue.shift()) {
+        for (const event of lane) {
+          await this.processEvent(event, relayContext);
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(this.concurrency, queue.length) }, worker),
+    );
+  }
+
+  private async processEvent(event: RawContractEvent, relayContext: TracingContext): Promise<void> {
+    const relayStart = Date.now();
+    // ── event_relay span ───────────────────────────────────────────────
+    // Parent is the poll span so spans form a coherent tree:
+    // rpc_poll → event_relay (one child per event)
+    const relaySpan = this.tracer.startSpan('event_relay', relayContext);
+    // Low-cardinality attributes only — event ID and contract ID are stable
+    // identifiers, not user-data payloads. The event value is redacted by
+    // the tracer (redactPayload: true by default).
+    relaySpan.setAttribute('event.id', event.id);
+    relaySpan.setAttribute('event.contract_id', event.contractId);
+    relaySpan.setAttribute('event.ledger', event.ledger);
+
+    this.logger.info('horizon-listener: received contract event', event);
+    const maxEventAttempts = this.eventRetry
+      ? Math.max(1, this.eventRetry.maxRetries ?? 3)
+      : 1;
+    let eventError: unknown;
+    let eventSucceeded = false;
+
+    for (let eventAttempt = 1; eventAttempt <= maxEventAttempts; eventAttempt += 1) {
+      try {
+        await this.onEvent(event);
+        eventSucceeded = true;
+        break;
+      } catch (err) {
+        eventError = err;
+        if (eventAttempt >= maxEventAttempts) {
+          break;
+        }
+
+        const delayMs = computeBackoffDelayMs(eventAttempt, this.eventRetry);
+        this.logger.warn(
+          `horizon-listener: onEvent failed (attempt ${eventAttempt}/${maxEventAttempts}), retrying in ${delayMs}ms`,
+          err,
+        );
+        await this.sleep(delayMs);
+      }
+    }
+
+    if (eventSucceeded) {
+      const relayDuration = Date.now() - relayStart;
+      this.metrics.counter.inc('event_relay', 'success');
+      this.metrics.histogram.observe('event_relay', relayDuration);
+      relaySpan.end('ok');
+    } else {
+      const relayDuration = Date.now() - relayStart;
+      this.logger.error('horizon-listener: onEvent handler threw', eventError);
+      this.metrics.counter.inc('event_relay', 'failure');
+      this.metrics.histogram.observe('event_relay', relayDuration);
+      relaySpan.end(
+        'error',
+        eventError instanceof Error ? eventError : new Error(String(eventError)),
+      );
+      if (this.onEventFailure) {
+        try {
+          await this.onEventFailure(event, eventError);
+        } catch (failureErr) {
+          this.logger.error('horizon-listener: onEventFailure handler threw', failureErr);
+        }
       }
     }
   }
