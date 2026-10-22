@@ -14,7 +14,8 @@
   "scripts": {
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
-    "test": "jest"
+    "test": "jest",
+    "bench": "ts-node bench/listener-throughput.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.0.1",

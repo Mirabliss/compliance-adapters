@@ -105,3 +105,44 @@ export class FileDeadLetterQueue extends InMemoryDeadLetterQueue {
     );
   }
 }
+
+/** Options for {@link replayDeadLetterQueue}. */
+export interface ReplayDeadLetterQueueOptions {
+  queue: DeadLetterQueue;
+  /** Redeliver one event; must resolve on success and reject on failure. */
+  send: (event: RawContractEvent) => Promise<void>;
+  /** When true, entries are counted but never removed. */
+  dryRun?: boolean;
+  /** Maximum entries to attempt (oldest first). Defaults to all. */
+  limit?: number;
+}
+
+/** Outcome of {@link replayDeadLetterQueue}. */
+export interface ReplayDeadLetterQueueResult {
+  delivered: number;
+  failed: number;
+  attempted: number;
+}
+
+/**
+ * Replays DLQ entries (oldest first) via `send`, removing each entry only
+ * after a successful redelivery. Failures remain queued for a later retry.
+ */
+export async function replayDeadLetterQueue(
+  options: ReplayDeadLetterQueueOptions,
+): Promise<ReplayDeadLetterQueueResult> {
+  const { queue, send, dryRun = false, limit } = options;
+  const entries = queue.getAll().slice(0, limit ?? Number.MAX_SAFE_INTEGER);
+  let delivered = 0;
+  let failed = 0;
+  for (const entry of entries) {
+    try {
+      await send(entry.event);
+      delivered++;
+      if (!dryRun) await queue.remove(entry.event.id);
+    } catch {
+      failed++;
+    }
+  }
+  return { delivered, failed, attempted: entries.length };
+}

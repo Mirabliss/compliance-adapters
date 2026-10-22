@@ -5,7 +5,7 @@
 
 export { SanctionsProvider } from './SanctionsProvider';
 export { MockSanctionsProvider, MOCK_FLAGGED_ADDRESSES } from './mockProvider';
-export { CsvSanctionsProvider } from './csvProvider';
+export { CsvSanctionsProvider, parseCsv } from './csvProvider';
 export {
   syncSanctionsToDenylist,
   createRpcDenylistWriter,
@@ -20,7 +20,17 @@ export {
   RpcDenylistWriterOptions,
   CliArgs,
   toSafeLogString,
+  EXIT_CODE_DEADLINE_EXCEEDED,
 } from './sync';
+export { type Signer, KeypairSigner, toSigner, signTransaction } from './signer';
+export {
+  CircuitBreakerSanctionsProvider,
+  CircuitOpenError,
+  CIRCUIT_STATE_VALUES,
+  PROVIDER_CIRCUIT_STATE_METRIC,
+  type CircuitState,
+  type CircuitBreakerOptions,
+} from './circuitBreakerProvider';
 export { SyncCheckpointStore, InMemoryCheckpointStore } from './checkpoint';
 export { withRetry, RetryOptions } from './retry';
 export {
@@ -58,6 +68,7 @@ export {
   type SpanExporter,
   type TracingContext,
   type TracingOptions,
+  extractTraceContext,
 } from './tracing';
 export { RateLimitedSanctionsProvider, RateLimitOptions } from './rateLimitedProvider';
 export { RestSanctionsProvider } from './restProvider';

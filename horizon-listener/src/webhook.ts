@@ -84,6 +84,10 @@ export interface HttpWebhookSenderOptions {
   tracer?: AnyTracer;
   /** Parent context for outbound webhook spans. */
   parentContext?: TracingContext;
+  /**
+   * When `false`, no `traceparent` header is sent. Defaults to `true`.
+   */
+  propagateTraceContext?: boolean;
 }
 
 export class HttpWebhookSender implements WebhookSender {
@@ -95,6 +99,7 @@ export class HttpWebhookSender implements WebhookSender {
   private readonly metrics: AnyMetricsRegistry;
   private readonly tracer: AnyTracer;
   private readonly parentContext: TracingContext | undefined;
+  private readonly propagateTraceContext: boolean;
 
   constructor(options: HttpWebhookSenderOptions) {
     // Validate URL is syntactically valid and has a protocol (http/https)
@@ -125,6 +130,7 @@ export class HttpWebhookSender implements WebhookSender {
     this.metrics = options.metrics ?? new NoopMetricsRegistry();
     this.tracer = options.tracer ?? new NoopTracer();
     this.parentContext = options.parentContext;
+    this.propagateTraceContext = options.propagateTraceContext !== false;
   }
 
   /**
@@ -153,10 +159,11 @@ export class HttpWebhookSender implements WebhookSender {
     // event.id is a stable, low-cardinality correlation identifier — safe to attach
     span.setAttribute('event.id', event.id);
 
-    // Inject traceparent into outbound request headers for downstream correlation
-    const traceparent = span.traceId
-      ? this.tracer.injectContext({ traceId: span.traceId, spanId: span.spanId })
-      : undefined;
+    // Inject W3C traceparent for downstream correlation (disable via propagateTraceContext: false).
+    const traceparent =
+      this.propagateTraceContext && span.traceId
+        ? this.tracer.injectContext({ traceId: span.traceId, spanId: span.spanId })
+        : undefined;
     if (traceparent) {
       headers['traceparent'] = traceparent;
     }
@@ -184,13 +191,16 @@ export class HttpWebhookSender implements WebhookSender {
             headers,
             body,
             signal: controller?.signal,
-          });
+            ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
+          } as RequestInit);
 
           const durationMs = Date.now() - start;
 
           if (!response.ok) {
+            const errorBody = await readErrorBody(response);
             throw new WebhookHttpError(
-              `horizon-listener: webhook POST to ${this.url} failed with status ${response.status}`,
+              `horizon-listener: webhook POST to ${this.url} failed with status ${response.status}` +
+                (errorBody ? `: ${errorBody}` : ''),
               response.status,
             );
           }

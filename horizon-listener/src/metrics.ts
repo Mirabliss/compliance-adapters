@@ -19,17 +19,18 @@ import {
   NoopMetricsRegistry as GenericNoopMetricsRegistry,
   DEFAULT_HISTOGRAM_BUCKETS,
   type Counter,
+  type Gauge,
   type Histogram,
   type Outcome,
   type MetricsRegistryOptions as GenericMetricsRegistryOptions,
 } from '@compliance-adapters/metrics';
 
 export { DEFAULT_HISTOGRAM_BUCKETS };
-export type { Counter, Histogram, Outcome };
+export type { Counter, Gauge, Histogram, Outcome };
 
-export type Phase = 'rpc_poll' | 'event_relay' | 'webhook';
+export type Phase = 'rpc_poll' | 'event_relay' | 'webhook' | 'rpc_failover';
 
-const PHASES: Phase[] = ['rpc_poll', 'event_relay', 'webhook'];
+const PHASES: Phase[] = ['rpc_poll', 'event_relay', 'webhook', 'rpc_failover'];
 
 export type MetricsRegistryOptions = Omit<
   GenericMetricsRegistryOptions<Phase>,

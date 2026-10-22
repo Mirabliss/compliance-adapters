@@ -1,6 +1,7 @@
 # compliance-adapters
 
 [![CI](https://github.com/stellar-compliance-kit/compliance-adapters/actions/workflows/ci.yml/badge.svg)](https://github.com/stellar-compliance-kit/compliance-adapters/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/stellar-compliance-kit/compliance-adapters/badge)](https://scorecard.dev/viewer/?uri=github.com/stellar-compliance-kit/compliance-adapters)
 
 Integration adapters connecting Stellar compliance primitives to SEP-10 auth, sanctions oracles, and Horizon/RPC event streams.
 
@@ -36,6 +37,20 @@ Each package has its own `README.md`, tests, and `package.json`.
 
 Runnable examples live under [`examples/`](./examples). Each is a self-contained npm workspace
 that wires the adapters together in a realistic scenario.
+
+### [`examples/sep10-browser-login`](./examples/sep10-browser-login)
+
+A Vite + vanilla TypeScript single-page app that demonstrates the **client-side**
+SEP-10 flow using the [Freighter](https://www.freighter.app/) browser wallet:
+
+1. Connect Freighter and obtain the user's Stellar public key.
+2. `GET /auth?account=<G…>` — fetch an unsigned challenge XDR from the example server.
+3. Sign the XDR in-browser via Freighter's `signTransaction()` API.
+4. `POST /auth { transaction }` — submit the signed XDR; receive a JWT.
+5. Store the JWT in `sessionStorage` and display it for use as a Bearer token.
+
+Runs against the `full-stack-demo` server (or any SEP-10-compliant API) via a
+Vite dev-server proxy. No CORS configuration required during development.
 
 ### [`examples/sep10-sanctions-gate`](./examples/sep10-sanctions-gate)
 
