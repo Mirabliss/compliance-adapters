@@ -121,7 +121,7 @@ function build(s: Scenario, mutation: Mutation | null): { xdr: string; verifyPas
   };
 }
 
-function verify(s: Scenario, mutation: Mutation | null) {
+async function verify(s: Scenario, mutation: Mutation | null) {
   const { xdr, verifyPassphrase } = build(s, mutation);
   return verifyChallenge(xdr, {
     serverAccountId: s.server.publicKey(),
@@ -142,10 +142,10 @@ describe('verifyChallenge - property-based mutation tests', () => {
     expect(MUTATIONS.length).toBeGreaterThanOrEqual(6);
   });
 
-  it('accepts the unmutated challenge', () => {
-    fc.assert(
-      fc.property(distinctScenarioArb, (s) => {
-        const result = verify(s, null);
+  it('accepts the unmutated challenge', async () => {
+    await fc.assert(
+      fc.asyncProperty(distinctScenarioArb, async (s) => {
+        const result = await verify(s, null);
         expect(result.valid).toBe(true);
         expect(result.address).toBe(s.client.publicKey());
       }),
@@ -153,10 +153,10 @@ describe('verifyChallenge - property-based mutation tests', () => {
     );
   });
 
-  it.each(MUTATIONS)('rejects the "%s" mutation', (mutation) => {
-    fc.assert(
-      fc.property(distinctScenarioArb, (s) => {
-        const result = verify(s, mutation);
+  it.each(MUTATIONS)('rejects the "%s" mutation', async (mutation) => {
+    await fc.assert(
+      fc.asyncProperty(distinctScenarioArb, async (s) => {
+        const result = await verify(s, mutation);
         expect(result.valid).toBe(false);
         expect(result.address).toBe('');
       }),

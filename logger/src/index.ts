@@ -143,3 +143,86 @@ export function createLeveledLogger(base: Logger, minLevel: LogLevel): Logger {
       makeBoundChild(base, bindings, emitBound),
   };
 }
+
+/** Writable target for {@link jsonLogger}. Only `write` is used. */
+export interface JsonLogStream {
+  write(chunk: string): void;
+}
+
+function errorToContext(err: Error): Record<string, unknown> {
+  return { msg: err.message, stack: err.stack, type: err.name };
+}
+
+function argsToRecord(args: unknown[]): { msg: string; context: Record<string, unknown> } {
+  if (args.length === 0) return { msg: '', context: {} };
+  const [first, ...rest] = args;
+  if (first instanceof Error) {
+    const base = errorToContext(first);
+    const context: Record<string, unknown> = { ...base };
+    for (const extra of rest) {
+      if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+        Object.assign(context, extra as Record<string, unknown>);
+      } else if (extra !== undefined) {
+        context.data = context.data ?? [];
+        (context.data as unknown[]).push(extra);
+      }
+    }
+    return { msg: String(base.msg), context };
+  }
+  if (typeof first === 'string') {
+    const context: Record<string, unknown> = {};
+    for (const extra of rest) {
+      if (extra instanceof Error) {
+        Object.assign(context, { error: errorToContext(extra) });
+      } else if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+        Object.assign(context, extra as Record<string, unknown>);
+      } else if (extra !== undefined) {
+        context.data = context.data ?? [];
+        (context.data as unknown[]).push(extra);
+      }
+    }
+    return { msg: first, context };
+  }
+  if (first && typeof first === 'object' && !Array.isArray(first)) {
+    const obj = first as Record<string, unknown>;
+    const msg =
+      typeof obj.msg === 'string'
+        ? obj.msg
+        : typeof obj.message === 'string'
+          ? obj.message
+          : JSON.stringify(first);
+    const context: Record<string, unknown> = { ...obj };
+    for (const extra of rest) {
+      if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+        Object.assign(context, extra as Record<string, unknown>);
+      }
+    }
+    return { msg, context };
+  }
+  return { msg: String(first), context: rest.length > 0 ? { data: rest } : {} };
+}
+
+/**
+ * Create a JSON structured logger that writes one JSON object per line.
+ *
+ * Each line has pino-compatible field names: `time` (epoch ms), `level`
+ * (level name), `msg` (message string) plus any merged `context` fields.
+ * Errors serialize to `{ msg, stack, type }`.
+ */
+export function jsonLogger(options: { level?: LogLevel; stream?: JsonLogStream } = {}): Logger {
+  const minLevel = options.level ?? 'debug';
+  const minRank = LOG_LEVEL_RANK[minLevel];
+  const stream: JsonLogStream =
+    options.stream ?? ({ write: (s: string) => process.stdout.write(s) } as JsonLogStream);
+  const emit = (level: LogLevel, args: unknown[]): void => {
+    if (LOG_LEVEL_RANK[level] < minRank) return;
+    const { msg, context } = argsToRecord(args);
+    stream.write(JSON.stringify({ time: Date.now(), level, msg, ...context }) + '\n');
+  };
+  return {
+    debug: (...args: unknown[]) => emit('debug', args),
+    info: (...args: unknown[]) => emit('info', args),
+    warn: (...args: unknown[]) => emit('warn', args),
+    error: (...args: unknown[]) => emit('error', args),
+  };
+}

@@ -16,7 +16,7 @@ import { isValidStellarAddress, normalizeStellarAddress } from '@compliance-adap
 import { type Logger, noopLogger, consoleLogger } from '@compliance-adapters/logger';
 export type { Logger } from '@compliance-adapters/logger';
 import { SanctionsProvider } from './SanctionsProvider';
-import { SyncCheckpointStore } from './checkpoint';
+import { CheckpointStore, SyncCheckpointStore } from './checkpoint';
 import { MockSanctionsProvider } from './mockProvider';
 import { CsvSanctionsProvider } from './csvProvider';
 import { RateLimitedSanctionsProvider } from './rateLimitedProvider';
@@ -262,7 +262,7 @@ export interface SyncOptions {
    * once the denylist write succeeds). Pass {@link SyncOptions.resume} on a
    * later run to skip everything already recorded.
    */
-  checkpoint?: SyncCheckpointStore;
+  checkpoint?: CheckpointStore | SyncCheckpointStore;
   /**
    * When true and a {@link SyncOptions.checkpoint} is provided, addresses the
    * checkpoint already reports as complete are skipped (returned in
@@ -472,8 +472,12 @@ export async function syncSanctionsToDenylist(options: SyncOptions): Promise<Syn
   let pendingAddresses = validAddresses;
   if (resume && checkpoint) {
     pendingAddresses = [];
+    const loaded = 'load' in checkpoint ? new Set(await checkpoint.load()) : undefined;
     for (const address of validAddresses) {
-      if (await checkpoint.isComplete(address)) {
+      const complete = loaded
+        ? loaded.has(address)
+        : await (checkpoint as SyncCheckpointStore).isComplete(address);
+      if (complete) {
         skipped.push(address);
       } else {
         pendingAddresses.push(address);

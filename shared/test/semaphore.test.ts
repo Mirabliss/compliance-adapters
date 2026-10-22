@@ -8,7 +8,7 @@
  * Issue #299: Extract shared semaphore/concurrency-limiting primitive.
  */
 
-import { createSemaphore } from '../src/semaphore';
+import { createSemaphore, SemaphoreTimeoutError } from '../src/semaphore';
 
 describe('createSemaphore', () => {
   beforeEach(() => {
@@ -174,5 +174,53 @@ describe('createSemaphore', () => {
     await Promise.all(promises);
 
     expect(completedTasks).toHaveLength(5);
+  });
+
+  it('rejects with SemaphoreTimeoutError and removes the waiter on timeout', async () => {
+    const semaphore = createSemaphore(1);
+    const release = await semaphore.acquire();
+
+    const timedOut = semaphore.acquire({ timeoutMs: 50 });
+    const assertion = expect(timedOut).rejects.toBeInstanceOf(
+      SemaphoreTimeoutError,
+    );
+    await jest.advanceTimersByTimeAsync(60);
+    await assertion;
+
+    // The timed-out waiter must be gone: a later acquire is granted first.
+    release();
+    const release2 = await semaphore.acquire();
+    release2();
+  });
+
+  it('leaves other waiters unaffected when one waiter times out', async () => {
+    const semaphore = createSemaphore(1);
+    const order: string[] = [];
+    const release = await semaphore.acquire();
+
+    const doomed = semaphore.acquire({ timeoutMs: 10 });
+    const doomedAssertion = expect(doomed).rejects.toBeInstanceOf(
+      SemaphoreTimeoutError,
+    );
+
+    const survivor = (async () => {
+      const r = await semaphore.acquire();
+      order.push('survivor-acquired');
+      r();
+    })();
+
+    await jest.advanceTimersByTimeAsync(20);
+    await doomedAssertion;
+
+    release();
+    await survivor;
+    expect(order).toEqual(['survivor-acquired']);
+  });
+
+  it('rejects immediately when the abort signal is already aborted', async () => {
+    const semaphore = createSemaphore(1);
+    await expect(
+      semaphore.acquire({ signal: AbortSignal.abort() }),
+    ).rejects.toBeDefined();
   });
 });
