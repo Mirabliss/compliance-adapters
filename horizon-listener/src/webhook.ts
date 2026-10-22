@@ -133,7 +133,10 @@ export class HttpWebhookSender implements WebhookSender {
    */
   async send(event: RawContractEvent): Promise<void> {
     const body = JSON.stringify({ event });
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {
+      ...this.customHeaders,
+      'Content-Type': 'application/json',
+    };
 
     if (this.signingSecret) {
       const timestamp = Math.floor(Date.now() / 1000).toString();
@@ -181,13 +184,16 @@ export class HttpWebhookSender implements WebhookSender {
             headers,
             body,
             signal: controller?.signal,
-          });
+            ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
+          } as RequestInit);
 
           const durationMs = Date.now() - start;
 
           if (!response.ok) {
+            const errorBody = await readErrorBody(response);
             throw new WebhookHttpError(
-              `horizon-listener: webhook POST to ${this.url} failed with status ${response.status}`,
+              `horizon-listener: webhook POST to ${this.url} failed with status ${response.status}` +
+                (errorBody ? `: ${errorBody}` : ''),
               response.status,
             );
           }

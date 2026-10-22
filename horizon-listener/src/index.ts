@@ -13,6 +13,8 @@
 export { HorizonListener, type HorizonListenerOptions, type Logger } from './listener';
 export {
   RpcEventSource,
+  CursorOutOfRangeError,
+  toCursorOutOfRangeError,
   type EventSource,
   type RawContractEvent,
   type RpcEventSourceOptions,

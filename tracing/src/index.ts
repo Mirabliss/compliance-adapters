@@ -341,3 +341,115 @@ export function extractTraceContext(
 }
 
 export type AnyTracer = DefaultTracer | NoopTracer;
+
+// ── OpenTelemetry bridge ──────────────────────────────────────────────────────
+
+/**
+ * Minimal structural view of an OpenTelemetry span. Declared locally so
+ * `@opentelemetry/api` stays an optional peer dependency — this module never
+ * imports it at runtime.
+ */
+export interface OtelSpanLike {
+  setAttribute(key: string, value: string | number | boolean): unknown;
+  setStatus(status: { code: number; message?: string }): unknown;
+  recordException?(error: Error): unknown;
+  end(): void;
+  spanContext?(): { traceId: string; spanId: string };
+}
+
+/**
+ * Minimal structural view of an OpenTelemetry tracer (e.g. the result of
+ * `trace.getTracer(name)` from `@opentelemetry/api`).
+ */
+export interface OtelTracerLike {
+  startSpan(name: string, options?: unknown, context?: unknown): OtelSpanLike;
+}
+
+/** OTel `SpanStatusCode`: UNSET=0, OK=1, ERROR=2. */
+const OTEL_STATUS = { UNSET: 0, OK: 1, ERROR: 2 } as const;
+
+class OtelSpanAdapter implements Span {
+  readonly traceId: string;
+  readonly spanId: string;
+
+  constructor(
+    private readonly otelSpan: OtelSpanLike,
+    traceId: string,
+    spanId: string,
+  ) {
+    this.traceId = traceId;
+    this.spanId = spanId;
+  }
+
+  setAttribute(key: string, value: string | number | boolean): void {
+    this.otelSpan.setAttribute(key, value);
+  }
+
+  end(status: SpanStatus = 'ok', error?: Error): void {
+    if (status === 'ok') {
+      this.otelSpan.setStatus({ code: OTEL_STATUS.OK });
+    } else if (status === 'error') {
+      this.otelSpan.setStatus({ code: OTEL_STATUS.ERROR, message: error?.message });
+      if (error && typeof this.otelSpan.recordException === 'function') {
+        this.otelSpan.recordException(error);
+      }
+    } else {
+      this.otelSpan.setStatus({ code: OTEL_STATUS.ERROR, message: 'cancelled' });
+    }
+    this.otelSpan.end();
+  }
+}
+
+class OtelTracerAdapter implements Tracer {
+  constructor(private readonly otelTracer: OtelTracerLike) {}
+
+  startSpan(name: string, _parentContext?: TracingContext): Span {
+    const otelSpan = this.otelTracer.startSpan(name);
+    const ctx = typeof otelSpan.spanContext === 'function' ? otelSpan.spanContext() : undefined;
+    return new OtelSpanAdapter(
+      otelSpan,
+      ctx?.traceId ?? randomHex(16),
+      ctx?.spanId ?? randomHex(8),
+    );
+  }
+
+  extractContext(traceparent: string | undefined): TracingContext | undefined {
+    if (!traceparent) return undefined;
+    const parts = traceparent.split('-');
+    if (parts.length < 4 || parts[1].length !== 32 || parts[2].length !== 16) {
+      return undefined;
+    }
+    return { traceId: parts[1], spanId: parts[2] };
+  }
+
+  injectContext(context: TracingContext): string {
+    return `00-${context.traceId}-${context.spanId}-01`;
+  }
+
+  async shutdown(): Promise<void> {}
+}
+
+/**
+ * Bridge the internal {@link Tracer} interface on top of an OpenTelemetry
+ * tracer, enabling export to Jaeger, Tempo, Datadog, or any OTel backend.
+ *
+ * `@opentelemetry/api` is an optional peer dependency — pass any object
+ * satisfying the {@link OtelTracerLike} shape (e.g. `trace.getTracer(name)`).
+ *
+ * Status mapping: `ok` → `SpanStatusCode.OK`, `error` → `ERROR` (with the
+ * error message), `cancelled` → `ERROR` with message `'cancelled'`.
+ *
+ * @example
+ * ```ts
+ * import { trace } from '@opentelemetry/api';
+ * import { createOtelTracer } from '@compliance-adapters/tracing';
+ *
+ * const tracer = createOtelTracer(trace.getTracer('compliance-adapters'));
+ * const span = tracer.startSpan('address_check');
+ * span.setAttribute('phase', 'address_check');
+ * span.end('ok');
+ * ```
+ */
+export function createOtelTracer(otelTracer: OtelTracerLike): Tracer {
+  return new OtelTracerAdapter(otelTracer);
+}
