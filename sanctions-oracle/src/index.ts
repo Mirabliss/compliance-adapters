@@ -20,17 +20,18 @@ export {
   RpcDenylistWriterOptions,
   CliArgs,
   toSafeLogString,
+  EXIT_CODE_DEADLINE_EXCEEDED,
 } from './sync';
+export { type Signer, KeypairSigner, toSigner, signTransaction } from './signer';
 export {
-  CheckpointStore,
-  SyncCheckpointStore,
-  FileCheckpointStore,
-  FileCheckpointStoreOptions,
-  RedisCheckpointStore,
-  RedisCheckpointStoreOptions,
-  CheckpointRedisLike,
-  InMemoryCheckpointStore,
-} from './checkpoint';
+  CircuitBreakerSanctionsProvider,
+  CircuitOpenError,
+  CIRCUIT_STATE_VALUES,
+  PROVIDER_CIRCUIT_STATE_METRIC,
+  type CircuitState,
+  type CircuitBreakerOptions,
+} from './circuitBreakerProvider';
+export { SyncCheckpointStore, InMemoryCheckpointStore } from './checkpoint';
 export { withRetry, RetryOptions } from './retry';
 export {
   ProviderRegistry,
