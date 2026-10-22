@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { noopLogger } from '@compliance-adapters/logger';
 import {
@@ -56,14 +56,14 @@ export interface Sep10FastifyOptions extends Sep10MiddlewareOptions {
  * ```
  */
 export const sep10Plugin: FastifyPluginAsync<Sep10FastifyOptions> = fp(
-  async (fastify, options) => {
+  async (fastify: FastifyInstance, options: Sep10FastifyOptions) => {
     const logger = options.logger ?? noopLogger;
     assertSep10MiddlewareOptions(options);
 
     fastify.decorateRequest('stellarAddress', undefined);
 
     const authenticate = async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-      let result = verifyRequestHeaders(request.headers, options);
+      let result = await verifyRequestHeaders(request.headers, options);
 
       if (result.ok && options.revocationStore) {
         try {

@@ -138,6 +138,10 @@ const DEFAULT_MAX_TOKEN_LENGTH = 8192;
  */
 export type BearerErrorCode = 'invalid_request' | 'invalid_token';
 
+function buildWwwAuthenticate(realm: string, error: BearerErrorCode): string {
+  return `Bearer realm="${realm}", error="${error}"`;
+}
+
 /** Request headers as exposed by Node's `http` module and Fastify. */
 export type RequestHeaders = Record<string, string | string[] | undefined>;
 
@@ -148,7 +152,7 @@ export type RequestHeaders = Record<string, string | string[] | undefined>;
  * value adapters must send alongside the 401 response.
  */
 export type AuthenticateRequestResult =
-  | { ok: true; address: string }
+  | { ok: true; address: string; jti?: string }
   | {
       ok: false;
       error: BearerErrorCode;
@@ -188,21 +192,15 @@ export function assertSep10MiddlewareOptions(options: Sep10MiddlewareOptions): s
   return homeDomains;
 }
 
-  return async (req, res, next) => {
-    // ── #38: Use parseBearerToken helper ──────────────────────────────────────
-    const parsed: ParseBearerTokenResult = options.getToken
-      ? parseCustomToken(options.getToken(req))
-      : parseBearerToken(req.header('Authorization') ?? '');
-
 /**
- * Synchronous half of {@link authenticateRequest}: parses the `Authorization`
- * header and verifies the signed challenge. It does not consult the revocation
- * store, so it can answer without yielding to the event loop.
+ * Verifies the `Authorization` header and signed challenge. It does not
+ * consult the revocation store, so callers needing revocation checks should
+ * use {@link authenticateRequest} instead.
  */
-export function verifyRequestHeaders(
+export async function verifyRequestHeaders(
   headers: RequestHeaders,
   options: Sep10MiddlewareOptions,
-): AuthenticateRequestResult {
+): Promise<AuthenticateRequestResult> {
   const maxTokenLength = options.maxTokenLength ?? DEFAULT_MAX_TOKEN_LENGTH;
   const realm = Array.isArray(options.homeDomains) ? options.homeDomains[0] : options.homeDomains;
 
@@ -244,7 +242,7 @@ export function verifyRequestHeaders(
     );
   }
 
-  const result = verifyChallenge(token, options);
+  const result = await verifyChallenge(token, options);
 
   if (!result.valid) {
     return fail(
@@ -255,7 +253,7 @@ export function verifyRequestHeaders(
     );
   }
 
-  return { ok: true, address: result.address };
+  return { ok: true, address: result.address, jti: result.jti };
 }
 
 /**
@@ -300,7 +298,7 @@ export async function authenticateRequest(
   headers: RequestHeaders,
   options: Sep10MiddlewareOptions,
 ): Promise<AuthenticateRequestResult> {
-  return applyRevocationStore(verifyRequestHeaders(headers, options), options);
+  return applyRevocationStore(await verifyRequestHeaders(headers, options), options);
 }
 
 // Reference pattern only: expects the raw signed SEP-10 challenge XDR on every
@@ -318,7 +316,7 @@ export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestH
   // ── Request handler ─────────────────────────────────────────────────────────
 
   return async (req, res, next) => {
-    let result = verifyRequestHeaders({ authorization: req.header('Authorization') }, options);
+    let result = await verifyRequestHeaders({ authorization: req.header('Authorization') }, options);
 
     if (result.ok && options.revocationStore) {
       try {
@@ -330,27 +328,27 @@ export function createSep10Middleware(options: Sep10MiddlewareOptions): RequestH
       }
     }
 
-      if (revoked) {
-        logger.warn('sep10-auth: address is revoked', { address: result.address });
-        res.status(401).json({ error: 'unauthorized', reason: 'address revoked' });
+    if (!result.ok) {
+      logger.warn('sep10-auth: challenge verification failed', { reason: result.reason });
+      res.status(401).json({ error: 'unauthorized', reason: result.reason });
+      res.set('WWW-Authenticate', result.wwwAuthenticate);
+      return;
+    }
+
+    if (options.revocationStore && result.jti !== undefined && options.revocationStore.isTokenRevoked) {
+      let tokenRevoked: boolean;
+      try {
+        tokenRevoked = await options.revocationStore.isTokenRevoked(result.jti);
+      } catch (error) {
+        logger.error('sep10-auth: revocation store lookup failed', error);
+        next(error);
         return;
       }
 
-      if (result.jti !== undefined && options.revocationStore.isTokenRevoked) {
-        let tokenRevoked: boolean;
-        try {
-          tokenRevoked = await options.revocationStore.isTokenRevoked(result.jti);
-        } catch (error) {
-          logger.error('sep10-auth: revocation store lookup failed', error);
-          next(error);
-          return;
-        }
-
-        if (tokenRevoked) {
-          logger.warn('sep10-auth: token is revoked', { address: result.address, jti: result.jti });
-          res.status(401).json({ error: 'unauthorized', reason: 'token revoked' });
-          return;
-        }
+      if (tokenRevoked) {
+        logger.warn('sep10-auth: token is revoked', { address: result.address, jti: result.jti });
+        res.status(401).json({ error: 'unauthorized', reason: 'token revoked' });
+        return;
       }
     }
 

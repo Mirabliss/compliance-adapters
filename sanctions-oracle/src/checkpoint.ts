@@ -3,42 +3,167 @@
  * SPDX-License-Identifier: MIT
  */
 
+import { promises as fs } from 'node:fs';
+import { dirname } from 'node:path';
+
 /**
- * A store {@link syncSanctionsToDenylist} can consult to make a large sync
- * resumable after a crash. As the sync completes work on each address it calls
- * {@link SyncCheckpointStore.markComplete}; on a later re-run with
- * `resume: true` any address {@link SyncCheckpointStore.isComplete} reports as
- * already done is skipped instead of being re-checked and (for flagged
- * addresses) re-written.
+ * Persistence contract used by resumable sanctions syncs.
  *
- * This mirrors the "reference interface, bring your own persistence" pattern
- * used by `RevocationStore` in sep10-auth: the package ships an in-memory
- * reference implementation ({@link InMemoryCheckpointStore}) and expects real
- * deployments to back it with a file, database, or KV store.
+ * `load` returns the addresses completed by an earlier run. Implementations
+ * should make `markComplete` durable before it resolves.
  */
-export interface SyncCheckpointStore {
-  /** Returns whether `address` has already been fully processed by a prior run. */
-  isComplete(address: string): boolean | Promise<boolean>;
-  /**
-   * Records `address` as fully processed. For clean addresses this is called
-   * right after the provider check; for flagged addresses only after the
-   * denylist write succeeds, so an interrupted write is retried on resume.
-   */
+export interface CheckpointStore {
+  load(): string[] | Promise<string[]>;
   markComplete(address: string): void | Promise<void>;
+  reset(): void | Promise<void>;
 }
 
 /**
- * In-memory reference implementation of {@link SyncCheckpointStore}. Completed
- * addresses are held in a `Set` and lost on process restart, so this only makes
- * a sync resumable within a single long-running process. Use it as a template
- * for a persistent store (write each completed address to a file, a `denylist`
- * table, Redis, etc.) when you need resume-after-crash.
+ * Legacy checkpoint contract retained for stores written against earlier
+ * versions. New stores should implement {@link CheckpointStore}.
  */
-export class InMemoryCheckpointStore implements SyncCheckpointStore {
+export interface SyncCheckpointStore {
+  isComplete(address: string): boolean | Promise<boolean>;
+  markComplete(address: string): void | Promise<void>;
+}
+
+export interface FileCheckpointStoreOptions {
+  /** Optional JSON indentation for the checkpoint file. Defaults to 2. */
+  spaces?: number;
+}
+
+/**
+ * JSON-file implementation of {@link CheckpointStore}.
+ *
+ * A missing file is treated as an empty checkpoint. Writes use a temporary
+ * file followed by a rename so a process restart cannot leave a partial JSON
+ * document behind.
+ */
+export class FileCheckpointStore implements CheckpointStore {
+  private readonly spaces: number;
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly filePath: string,
+    options: FileCheckpointStoreOptions = {},
+  ) {
+    this.spaces = options.spaces ?? 2;
+  }
+
+  async load(): Promise<string[]> {
+    try {
+      const content = await fs.readFile(this.filePath, 'utf8');
+      const parsed: unknown = JSON.parse(content);
+      if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+        throw new Error(`Checkpoint file must contain a JSON array of strings: ${this.filePath}`);
+      }
+      return [...new Set(parsed)];
+    } catch (error) {
+      if (isFileNotFound(error)) return [];
+      throw error;
+    }
+  }
+
+  async markComplete(address: string): Promise<void> {
+    await this.enqueue(async () => {
+      const completed = new Set(await this.load());
+      completed.add(address);
+      await this.write([...completed]);
+    });
+  }
+
+  async reset(): Promise<void> {
+    await this.enqueue(() => this.write([]));
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const next = this.writeQueue.then(operation);
+    this.writeQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async write(addresses: string[]): Promise<void> {
+    await fs.mkdir(dirname(this.filePath), { recursive: true });
+    const temporaryPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fs.writeFile(temporaryPath, `${JSON.stringify(addresses, null, this.spaces)}\n`, 'utf8');
+      await fs.rename(temporaryPath, this.filePath);
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true });
+      throw error;
+    }
+  }
+}
+
+/**
+ * Minimal Redis client surface required by {@link RedisCheckpointStore}.
+ * Both ioredis and node-redis can be adapted to this shape without adding a
+ * Redis client dependency to sanctions-oracle.
+ */
+export interface CheckpointRedisLike {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<unknown>;
+  del(key: string): Promise<unknown>;
+}
+
+export interface RedisCheckpointStoreOptions {
+  /** Redis key used for the serialized set of completed addresses. */
+  key?: string;
+}
+
+/**
+ * Redis-backed implementation of {@link CheckpointStore}.
+ */
+export class RedisCheckpointStore implements CheckpointStore {
+  private readonly key: string;
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly redis: CheckpointRedisLike,
+    options: RedisCheckpointStoreOptions = {},
+  ) {
+    this.key = options.key ?? 'sanctions-oracle:checkpoint';
+  }
+
+  async load(): Promise<string[]> {
+    const value = await this.redis.get(this.key);
+    if (value === null) return [];
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string')) {
+      throw new Error(`Redis checkpoint value must be a JSON array of strings: ${this.key}`);
+    }
+    return [...new Set(parsed)];
+  }
+
+  async markComplete(address: string): Promise<void> {
+    const next = this.writeQueue.then(async () => {
+      const completed = new Set(await this.load());
+      completed.add(address);
+      await this.redis.set(this.key, JSON.stringify([...completed]));
+    });
+    this.writeQueue = next.catch(() => undefined);
+    await next;
+  }
+
+  async reset(): Promise<void> {
+    const next = this.writeQueue.then(() => this.redis.del(this.key).then(() => undefined));
+    this.writeQueue = next.catch(() => undefined);
+    await next;
+  }
+}
+
+/**
+ * In-memory reference implementation of {@link CheckpointStore}.
+ */
+export class InMemoryCheckpointStore implements CheckpointStore, SyncCheckpointStore {
   private readonly completed: Set<string>;
 
   constructor(initiallyComplete: Iterable<string> = []) {
     this.completed = new Set(initiallyComplete);
+  }
+
+  load(): string[] {
+    return [...this.completed];
   }
 
   isComplete(address: string): boolean {
@@ -49,8 +174,20 @@ export class InMemoryCheckpointStore implements SyncCheckpointStore {
     this.completed.add(address);
   }
 
-  /** All addresses recorded as complete so far. */
-  snapshot(): string[] {
-    return [...this.completed];
+  reset(): void {
+    this.completed.clear();
   }
+
+  snapshot(): string[] {
+    return this.load();
+  }
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'ENOENT'
+  );
 }

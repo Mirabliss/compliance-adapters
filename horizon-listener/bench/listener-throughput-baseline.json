@@ -1,0 +1,4 @@
+{
+  "benchmark": "horizon-listener-webhook-throughput",
+  "opsPerSecond": 50
+}

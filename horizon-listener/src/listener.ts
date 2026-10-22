@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-import type { EventSource, RawContractEvent } from './eventSource';
+import { CursorOutOfRangeError, type EventSource, type RawContractEvent } from './eventSource';
 import { computeBackoffDelayMs, type BackoffOptions } from '@compliance-adapters/backoff';
 import { type AnyMetricsRegistry, NoopMetricsRegistry } from './metrics';
 import { type AnyTracer, NoopTracer, type TracingContext } from './tracing';
@@ -164,8 +164,89 @@ export class HorizonListener {
    * Starts the event listener loop.
    * @throws {Error} When max retries are exceeded for consecutive polling failures.
    * This is an unrecoverable error that indicates the listener cannot continue.
+   * @throws {CursorOutOfRangeError} When the cursor points at pruned history and `onGap` is `'fail'`.
+   *
+   * Pass `{ signal }` to stop the listener via an AbortController; the returned
+   * promise resolves once the loop has wound down. An already-aborted signal
+   * makes this a no-op.
    */
-  async start(): Promise<void> {
+  async start(options: StartOptions = {}): Promise<void> {
+    const { signal } = options;
+    if (signal?.aborted) return;
+    const onAbort = (): void => this.stop();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      await this.run();
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+    }
+  }
+
+  /**
+   * Consume events with `for await`. The listener only moves on to the next
+   * event (and only advances its cursor past a page) once the consumer pulls
+   * the next item, so a slow consumer applies backpressure to polling.
+   * Breaking out of the loop or aborting `signal` stops the listener.
+   */
+  async *events(options: StartOptions = {}): AsyncGenerator<RawContractEvent, void, undefined> {
+    const { signal } = options;
+    const queue: Array<{ event: RawContractEvent; ack: () => void }> = [];
+    let wake: (() => void) | undefined;
+    let done = false;
+    let closed = false;
+    let failure: unknown;
+    const notify = (): void => {
+      const w = wake;
+      wake = undefined;
+      w?.();
+    };
+
+    this.handler = (event) =>
+      closed || signal?.aborted
+        ? undefined
+        : new Promise<void>((ack) => {
+            queue.push({ event, ack });
+            notify();
+          });
+    const loop = this.start({ signal }).then(
+      () => {
+        done = true;
+        notify();
+      },
+      (err) => {
+        failure = err;
+        done = true;
+        notify();
+      },
+    );
+
+    let ack: (() => void) | undefined;
+    try {
+      while (true) {
+        ack?.();
+        ack = undefined;
+        while (queue.length === 0 && !done) {
+          await new Promise<void>((resolve) => (wake = resolve));
+        }
+        const item = queue.shift();
+        if (!item) {
+          if (failure !== undefined) throw failure;
+          return;
+        }
+        ack = item.ack;
+        yield item.event;
+      }
+    } finally {
+      closed = true;
+      this.stop();
+      ack?.();
+      for (const pending of queue.splice(0)) pending.ack();
+      await loop;
+      this.handler = this.onEvent;
+    }
+  }
+
+  private async run(): Promise<void> {
     this.running = true;
     this.attempt = 0;
 
@@ -186,6 +267,29 @@ export class HorizonListener {
         this.attempt += 1;
         pollSpan.setAttribute('poll.attempt', this.attempt);
         pollSpan.end('error', err instanceof Error ? err : new Error(String(err)));
+
+        if (err instanceof CursorOutOfRangeError) {
+          if (
+            this.onGap === 'skipToOldest' &&
+            err.oldestAvailable != null &&
+            this.eventSource.resetToLedger
+          ) {
+            const requested = Number(err.requested);
+            const gap = Number.isFinite(requested) ? err.oldestAvailable - requested : 'unknown';
+            this.logger.warn(
+              `horizon-listener: requested history was pruned; skipping to oldest available ledger ` +
+                `${err.oldestAvailable} (gap: ${gap} ledgers)`,
+              err,
+            );
+            this.eventSource.resetToLedger(err.oldestAvailable);
+            this.cursor = undefined;
+            this.attempt = 0;
+            continue;
+          }
+          this.running = false;
+          this.logger.error('horizon-listener: cursor is outside the RPC retention window, stopping', err);
+          throw err;
+        }
 
         this.logger.warn(
           `horizon-listener: poll failed (attempt ${this.attempt}/${this.maxRetries}), backing off`,
@@ -221,6 +325,7 @@ export class HorizonListener {
       const pollDuration = Date.now() - pollStart;
       this.metrics.counter.inc('rpc_poll', 'success');
       this.metrics.histogram.observe('rpc_poll', pollDuration);
+      this.metrics.gauge.set('rpc_poll', response.events.length);
       pollSpan.setAttribute('poll.event_count', response.events.length);
       pollSpan.end('ok');
 
