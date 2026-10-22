@@ -9,6 +9,13 @@ import type { RawContractEvent } from './eventSource';
 import { type AnyMetricsRegistry, NoopMetricsRegistry } from './metrics';
 import { type AnyTracer, NoopTracer, type TracingContext } from './tracing';
 
+/**
+ * Version of the webhook payload shape. Sent as the
+ * `X-Compliance-Schema-Version` header and the `schemaVersion` body field.
+ * Bumped only on breaking payload changes; see the README versioning policy.
+ */
+export const WEBHOOK_SCHEMA_VERSION = 1;
+
 export interface WebhookSender {
   send(event: RawContractEvent): Promise<void>;
 }
@@ -132,10 +139,10 @@ export class HttpWebhookSender implements WebhookSender {
    * Consumers should handle this error with retry logic or fallback behavior.
    */
   async send(event: RawContractEvent): Promise<void> {
-    const body = JSON.stringify({ event });
+    const body = JSON.stringify({ schemaVersion: WEBHOOK_SCHEMA_VERSION, event });
     const headers: Record<string, string> = {
-      ...this.customHeaders,
       'Content-Type': 'application/json',
+      'X-Compliance-Schema-Version': String(WEBHOOK_SCHEMA_VERSION),
     };
 
     if (this.signingSecret) {

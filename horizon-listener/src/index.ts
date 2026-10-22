@@ -18,6 +18,7 @@ export {
   type EventSource,
   type RawContractEvent,
   type RpcEventSourceOptions,
+  type RpcEventType,
 } from './eventSource';
 export {
   HorizonEventSource,
@@ -34,7 +35,19 @@ export {
   type ReplayDeadLetterQueueResult,
 } from './deadLetterQueue';
 export { computeBackoffDelayMs, type BackoffOptions } from '@compliance-adapters/backoff';
-export { HttpWebhookSender, WebhookHttpError, type WebhookSender, type HttpWebhookSenderOptions } from './webhook';
+export {
+  HttpWebhookSender,
+  WebhookHttpError,
+  WEBHOOK_SCHEMA_VERSION,
+  type WebhookSender,
+  type HttpWebhookSenderOptions,
+} from './webhook';
+export {
+  MultiWebhookSender,
+  MultiWebhookDeliveryError,
+  type MultiWebhookSenderOptions,
+  type WebhookTarget,
+} from './multiWebhook';
 export { createWebhookForwarder, type WebhookForwarderOptions } from './factory';
 export {
   MetricsRegistry,
