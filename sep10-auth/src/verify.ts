@@ -7,6 +7,39 @@ import { MuxedAccount, Networks, Operation, Transaction, WebAuth } from '@stella
 import { assertBareDomain } from './challenge';
 import { isValidStellarAddress } from '@compliance-adapters/shared';
 
+/**
+ * Subset of the Stellar account record needed for SEP-10 threshold verification.
+ * Mirrors the fields returned by Horizon's `GET /accounts/{id}` under
+ * `thresholds` and `signers`, but defined locally so callers don't need to
+ * depend on `@stellar/stellar-sdk`'s `ServerApi` namespace.
+ */
+export interface AccountRecord {
+  /** The account's Stellar address (G...). */
+  account_id: string;
+  /** Account-level thresholds: `low_threshold`, `med_threshold`, `high_threshold`. */
+  thresholds: {
+    low_threshold: number;
+    med_threshold: number;
+    high_threshold: number;
+  };
+  /** The account's signers with their weights. */
+  signers: Array<{
+    key: string;
+    weight: number;
+    type: string;
+  }>;
+}
+
+/**
+ * Loads a Stellar account from the ledger (e.g. a wrapper around Horizon's
+ * `server.loadAccount()`). Returns `null` when the account does not exist on
+ * the ledger (so verification falls back to the master-key check, per SEP-10).
+ *
+ * Any other error (network failure, rate limit, etc.) should reject; it will
+ * surface as a verification error with an appropriate {@link VerifyErrorCode}.
+ */
+export type AccountLoader = (accountId: string) => Promise<AccountRecord | null>;
+
 export interface VerifyChallengeOptions {
   serverAccountId: string;
   networkPassphrase?: string;
@@ -31,6 +64,24 @@ export interface VerifyChallengeOptions {
    * `INVALID_OPTIONS`. Defaults to `0` (no extra tolerance).
    */
   clockSkewToleranceSec?: number;
+  /**
+   * Optional callback that loads the client account from the ledger (e.g. a
+   * Horizon `loadAccount` wrapper). When provided, `verifyChallenge` verifies
+   * the challenge signatures against the account's on-ledger signer set and the
+   * medium threshold, as SEP-10 requires for existing accounts.
+   *
+   * When the account does not exist (`null` is returned), verification falls
+   * back to the master-key check (the client's `G...` address must have signed
+   * the challenge), which is the SEP-10 behaviour for accounts not yet on the
+   * ledger.
+   *
+   * When omitted, verification always uses the master-key check — this is the
+   * original behaviour and is safe for single-signer accounts whose master key
+   * weight meets the medium threshold, but will reject valid multisig
+   * accounts and will accept accounts whose master key has weight 0 (see
+   * issue #762).
+   */
+  accountLoader?: AccountLoader;
 }
 
 // Grace window WebAuth.readChallengeTx hard-codes when validating timebounds.
@@ -217,10 +268,10 @@ function classifyError(err: unknown): VerifyErrorCode {
   return 'UNKNOWN';
 }
 
-export function verifyChallenge(
+export async function verifyChallenge(
   signedTransactionXDR: string,
   options: VerifyChallengeOptions,
-): VerifyResult {
+): Promise<VerifyResult> {
   if (!isValidStellarAddress(options.serverAccountId)) {
     return {
       valid: false,
@@ -279,18 +330,67 @@ export function verifyChallenge(
       const muxed = isMuxed ? MuxedAccount.fromAddress(clientAccountID, '0') : undefined;
       const baseAccount = muxed ? muxed.baseAccount().accountId() : clientAccountID;
 
-      // Also validates that the client_domain operation's source key (if any)
-      // co-signed the transaction, per the SEP-10 client domain flow.
-      withClockSkewTolerance(signedTransactionXDR, networkPassphrase, clockSkewToleranceSec, () =>
-        WebAuth.verifyChallengeTxSigners(
-          signedTransactionXDR,
-          options.serverAccountId,
-          networkPassphrase,
-          [baseAccount],
-          options.homeDomains,
-          webAuthDomain,
-        ),
-      );
+      // ── #762: on-ledger signer / threshold verification ─────────────────────
+      // When an accountLoader is supplied, SEP-10 requires the server to load
+      // the client account's signers from the ledger and verify that the
+      // challenge signatures meet the medium threshold. If the account doesn't
+      // exist on the ledger yet, fall back to the master-key check.
+      if (options.accountLoader) {
+        let account: AccountRecord | null;
+        try {
+          account = await options.accountLoader(baseAccount);
+        } catch (loadError) {
+          return {
+            valid: false,
+            address: '',
+            error: `sep10-auth: accountLoader failed: ${loadError instanceof Error ? loadError.message : String(loadError)}`,
+            errorCode: 'UNKNOWN',
+          };
+        }
+
+        if (account) {
+          // Account exists on ledger: verify against the on-ledger signer set
+          // and the medium threshold.
+          withClockSkewTolerance(signedTransactionXDR, networkPassphrase, clockSkewToleranceSec, () =>
+            WebAuth.verifyChallengeTxThreshold(
+              signedTransactionXDR,
+              options.serverAccountId,
+              networkPassphrase,
+              account!.thresholds.med_threshold,
+              account!.signers,
+              options.homeDomains,
+              webAuthDomain,
+            ),
+          );
+        } else {
+          // Account doesn't exist on the ledger: fall back to the master-key
+          // check (the client's G... address must have signed the challenge).
+          withClockSkewTolerance(signedTransactionXDR, networkPassphrase, clockSkewToleranceSec, () =>
+            WebAuth.verifyChallengeTxSigners(
+              signedTransactionXDR,
+              options.serverAccountId,
+              networkPassphrase,
+              [baseAccount],
+              options.homeDomains,
+              webAuthDomain,
+            ),
+          );
+        }
+      } else {
+        // No accountLoader: verify against the master key only (original
+        // behaviour — safe for single-signer accounts but does not check
+        // thresholds or multisig signer sets).
+        withClockSkewTolerance(signedTransactionXDR, networkPassphrase, clockSkewToleranceSec, () =>
+          WebAuth.verifyChallengeTxSigners(
+            signedTransactionXDR,
+            options.serverAccountId,
+            networkPassphrase,
+            [baseAccount],
+            options.homeDomains,
+            webAuthDomain,
+          ),
+        );
+      }
 
       if (options.expectedMemo !== undefined) {
         const txMemo = encodeMemo(tx.memo);

@@ -108,9 +108,9 @@ addresses currently on the denylist); combine with `--dry-run` to preview.
 
 ### Resuming an interrupted sync
 
-Pass a `SyncOptions.checkpoint` store (interface `SyncCheckpointStore`, with
-an in-memory reference implementation `InMemoryCheckpointStore` — same
-"bring your own persistence" pattern as sep10-auth's `RevocationStore`) and
+Pass a `SyncOptions.checkpoint` store (interface `CheckpointStore`, with
+`FileCheckpointStore`, `RedisCheckpointStore`, and an in-memory reference
+implementation `InMemoryCheckpointStore`) and
 the sync records each address as it finishes: clean addresses right after
 the provider check, flagged addresses only once their denylist write
 succeeds. On a later run with `resume: true`, any address the checkpoint
@@ -118,6 +118,38 @@ already reports as complete is skipped (reported in `SyncResult.skipped`)
 instead of being re-checked and re-written — so a large sync that crashed
 after writing 500 of 2000 addresses picks up from 501 rather than paying
 the fees to re-write the first 500.
+
+Choose a persistent backend when constructing the sync options:
+
+```ts
+import { FileCheckpointStore, syncSanctionsToDenylist } from 'sanctions-oracle';
+
+await syncSanctionsToDenylist({
+  provider,
+  addresses,
+  writer,
+  checkpoint: new FileCheckpointStore('/var/lib/sanctions/checkpoint.json'),
+  resume: true,
+});
+```
+
+For containerized or horizontally scaled deployments, use Redis. The package
+does not bundle a Redis client; pass the small `CheckpointRedisLike` adapter
+around your client:
+
+```ts
+import Redis from 'ioredis';
+import { RedisCheckpointStore } from 'sanctions-oracle';
+
+const redis = new Redis(process.env.REDIS_URL);
+const checkpoint = new RedisCheckpointStore(redis, {
+  key: 'my-service:sanctions-checkpoint',
+});
+```
+
+Both stores implement `load()`, `markComplete(address)`, and `reset()`.
+`reset()` clears all recorded addresses so the next run starts from the
+beginning.
 
 ## The `SanctionsProvider` interface
 
