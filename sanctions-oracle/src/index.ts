@@ -68,6 +68,7 @@ export {
   type SpanExporter,
   type TracingContext,
   type TracingOptions,
+  extractTraceContext,
 } from './tracing';
 export { RateLimitedSanctionsProvider, RateLimitOptions } from './rateLimitedProvider';
 export { RestSanctionsProvider } from './restProvider';

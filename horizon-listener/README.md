@@ -1,5 +1,13 @@
 # horizon-listener
 
+> **Naming note:** despite its name, this package does **not** consume the
+> Horizon REST/SSE API. It polls **Soroban RPC `getEvents`** for contract
+> events (cursor-based polling, no persistent stream). Configure it with a
+> Soroban RPC URL (e.g. `STELLAR_RPC_URL=https://soroban-testnet.stellar.org`),
+> not a Horizon URL. A rename (e.g. to `@compliance-adapters/event-listener`
+> with this name kept as a deprecation alias) is tracked as a follow-up; see
+> the discussion linked from the issue tracker.
+
 An example/reference service that polls Soroban RPC for contract events emitted
 by the `denylist-gate` and `allowlist-token` contracts, logs them, and
 re-emits them to a webhook. Soroban RPC's `getEvents` is a cursor-based polling
